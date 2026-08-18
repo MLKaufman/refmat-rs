@@ -1,0 +1,8 @@
+/target/
+/.Rproj.user/
+/.renv/
+renv/library/
+*.refmat.tsv
+
+.DS_Store
+/testdata
