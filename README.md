@@ -15,6 +15,38 @@ cargo build --release
 
 The executable is `target/release/refmat`.
 
+## Install
+
+From a local clone of this repository:
+
+```bash
+cargo install --path .
+```
+
+This builds an optimized binary and installs `refmat` into Cargo's binary
+directory, normally `~/.cargo/bin`. Make sure that directory is included in
+your `PATH`, then confirm the installation:
+
+```bash
+refmat --version
+```
+
+Once the repository is hosted on GitHub, it can be installed directly without
+cloning it first:
+
+```bash
+cargo install --git https://github.com/OWNER/refmat.git --locked
+```
+
+Replace `OWNER` with the GitHub account or organization hosting the repository.
+The `--locked` option uses the dependency versions recorded in `Cargo.lock` for
+a reproducible build. Re-run the same command with `--force` to replace an
+existing installation:
+
+```bash
+cargo install --git https://github.com/OWNER/refmat.git --locked --force
+```
+
 ## Commands
 
 Inspect the generic Seurat/R object structure without loading large vectors:
@@ -105,4 +137,3 @@ R is used only for development validation and is not linked into the binary.
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the architecture,
 milestones, test matrix, and distribution plan.
-
