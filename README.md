@@ -31,20 +31,18 @@ your `PATH`, then confirm the installation:
 refmat --version
 ```
 
-Once the repository is hosted on GitHub, it can be installed directly without
-cloning it first:
+Install directly from GitHub without cloning the repository first:
 
 ```bash
-cargo install --git https://github.com/OWNER/refmat.git --locked
+cargo install --git https://github.com/MLKaufman/refmat.git --locked
 ```
 
-Replace `OWNER` with the GitHub account or organization hosting the repository.
 The `--locked` option uses the dependency versions recorded in `Cargo.lock` for
 a reproducible build. Re-run the same command with `--force` to replace an
 existing installation:
 
 ```bash
-cargo install --git https://github.com/OWNER/refmat.git --locked --force
+cargo install --git https://github.com/MLKaufman/refmat.git --locked --force
 ```
 
 ## Commands
