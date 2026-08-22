@@ -1,11 +1,17 @@
 # refmat
 
-`refmat` is an experimental standalone Rust CLI for inspecting Seurat RDS files
-and generating genes-by-cell-type reference matrices without requiring R at
-runtime.
+`refmat` is an experimental standalone Rust CLI for inspecting single-cell
+objects and generating genes-by-cell-type reference matrices without requiring
+R or Python at runtime.
 
-The current prototype supports the supplied Seurat v5 fixture and ordinary
-in-memory `Assay5` `dgCMatrix` layers.
+Input format and object type are detected automatically. The current prototype
+supports:
+
+- Seurat v5 objects in RDS files with in-memory `Assay5` `dgCMatrix` layers
+- Bioconductor `SingleCellExperiment` objects in RDS files with in-memory dense
+  numeric or `dgCMatrix` assays
+- Scanpy/AnnData H5AD files with dense, CSR, or CSC `X`/layers, including gzip
+  and LZF compression
 
 ## Build
 
@@ -14,6 +20,10 @@ cargo build --release
 ```
 
 The executable is `target/release/refmat`.
+
+Building requires Rust 1.85 or newer, CMake, and a C compiler. HDF5, gzip/LZF,
+and the RDS xz decoder are built into the executable; system HDF5 and liblzma
+installations are not required.
 
 ## Install
 
@@ -47,10 +57,11 @@ cargo install --git https://github.com/MLKaufman/refmat.git --locked --force
 
 ## Commands
 
-Inspect the generic Seurat/R object structure without loading large vectors:
+Inspect an object without loading its expression matrix into memory:
 
 ```bash
 refmat inspect testdata/so.rds
+refmat inspect sample.h5ad
 ```
 
 Print cell metadata as TSV:
@@ -58,6 +69,8 @@ Print cell metadata as TSV:
 ```bash
 refmat head testdata/so.rds
 refmat head testdata/so.rds -n 20
+refmat head sce.rds
+refmat head sample.h5ad
 ```
 
 Build a reference matrix from the active assay's normalized `data` layer:
@@ -65,6 +78,19 @@ Build a reference matrix from the active assay's normalized `data` layer:
 ```bash
 refmat build testdata/so.rds --column celltypes
 ```
+
+The same command works for a `SingleCellExperiment` or AnnData file:
+
+```bash
+refmat build sce.rds --column cell_type
+refmat build sample.h5ad --column cell_type
+```
+
+Defaults are format-aware:
+
+- Seurat: active assay and its `data` layer
+- SingleCellExperiment: `logcounts`, then `counts`, then the first assay
+- AnnData: `X`
 
 The default output is `testdata/so.refmat.tsv`. Assay, layer, and output can be
 selected explicitly:
@@ -77,6 +103,13 @@ refmat build testdata/so.rds \
   --output testdata/custom.refmat.tsv
 ```
 
+Select a SingleCellExperiment assay or AnnData layer explicitly:
+
+```bash
+refmat build sce.rds --column cell_type --assay logcounts
+refmat build sample.h5ad --column cell_type --layer counts
+```
+
 For `data`, values are calculated as:
 
 ```text
@@ -84,6 +117,18 @@ log1p(mean(expm1(log_normalized_expression)))
 ```
 
 For `counts`, values are calculated as `log1p(mean(counts))`.
+
+AnnData does not record whether `X` is raw or log-normalized. Automatic mode
+assumes `X` and non-`counts` assay/layer names are log1p-normalized. Override
+that interpretation when necessary:
+
+```bash
+refmat build raw-counts.h5ad --column cell_type --scale linear
+refmat build sample.h5ad --column cell_type --layer normalized --scale log1p
+```
+
+The file contents, not the filename extension, determine whether an input is
+H5AD or RDS. RDS inputs are then classified from their S4 class.
 
 ## Validation on the supplied fixture
 
@@ -121,14 +166,18 @@ R is used only for development validation and is not linked into the binary.
 
 ## Current limitations
 
-- Only `dgCMatrix` expression layers are accepted by `build`.
+- Seurat expression layers must currently be `dgCMatrix`; SCE supports dense
+  numeric matrices and `dgCMatrix`.
 - Metadata-to-layer alignment currently requires the layer to contain all cells
   in Seurat metadata order.
 - Split layers are not joined automatically.
-- BPCells, HDF5, DelayedArray, and external-pointer matrix backends are not
-  supported.
+- BPCells, DelayedArray/HDF5Array inside RDS, and external-pointer matrix
+  backends are not supported. Export those objects to an ordinary in-memory
+  assay or H5AD first.
+- H5AD `X` and named layers are supported, but `.raw/X` is not yet selectable.
+- H5AD annotation columns used for grouping must be categorical or string.
 - Character annotations preserve first-seen order; factor annotations preserve
-  R factor-level order.
+  R factor-level order; AnnData categoricals preserve category order.
 - Cells with missing annotations are excluded with no output column.
 - Each invocation decompresses a gzip RDS into a temporary backing file. A
   persistent cache could improve repeated-command latency.

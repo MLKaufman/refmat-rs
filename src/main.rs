@@ -1,16 +1,28 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rds2rust::{
     Attributes, ChunkedRdsSource, Logical, ParseConfig, RObject, RdsInput, VectorData,
     read_lazy_character_range, read_lazy_integer_range, read_lazy_logical_range,
     read_lazy_real_range, read_rds_from_path_chunked, read_rds_with_input,
 };
+
+mod h5ad;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum InputScale {
+    /// Infer from the assay/layer name; otherwise assume log1p-normalized values.
+    Auto,
+    /// Values are log1p-normalized and are averaged on the linear scale.
+    Log1p,
+    /// Values are already linear (for example raw counts).
+    Linear,
+}
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -46,6 +58,9 @@ enum Command {
         assay: Option<String>,
         #[arg(long)]
         layer: Option<String>,
+        /// Interpretation of matrix values before group averaging.
+        #[arg(long, value_enum, default_value_t = InputScale::Auto)]
+        scale: InputScale,
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -61,14 +76,34 @@ fn main() -> Result<()> {
             column,
             assay,
             layer,
+            scale,
             output,
         } => build(
             &file,
             &column,
             assay.as_deref(),
             layer.as_deref(),
+            scale,
             output.as_deref(),
         ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputFormat {
+    Rds,
+    H5ad,
+}
+
+fn detect_format(file: &Path) -> Result<InputFormat> {
+    let mut handle =
+        File::open(file).with_context(|| format!("failed to open {}", file.display()))?;
+    let mut magic = [0u8; 8];
+    let read = handle.read(&mut magic)?;
+    if read == magic.len() && magic == [0x89, b'H', b'D', b'F', b'\r', b'\n', 0x1a, b'\n'] {
+        Ok(InputFormat::H5ad)
+    } else {
+        Ok(InputFormat::Rds)
     }
 }
 
@@ -97,6 +132,9 @@ fn parse_lazy(file: &Path) -> Result<ParsedRds> {
 }
 
 fn inspect(file: &Path, depth: usize, full: bool) -> Result<()> {
+    if detect_format(file)? == InputFormat::H5ad {
+        return h5ad::inspect(file, depth);
+    }
     if full {
         let object = read_rds_from_path_chunked(file)
             .with_context(|| format!("failed to parse {}", file.display()))?
@@ -111,8 +149,14 @@ fn inspect(file: &Path, depth: usize, full: bool) -> Result<()> {
 }
 
 fn head(file: &Path, rows: usize) -> Result<()> {
+    if detect_format(file)? == InputFormat::H5ad {
+        return h5ad::head(file, rows);
+    }
     let parsed = parse_lazy(file)?;
-    let frame = metadata_frame(&parsed.object)?;
+    if is_sce(&parsed.object) {
+        return sce_head(&parsed, rows);
+    }
+    let frame = seurat_metadata_frame(&parsed.object)?;
     let take = rows.min(frame.row_names.len());
     let row_names = seurat_cell_names(&parsed.object, &parsed.source, take)
         .unwrap_or_else(|_| frame.row_names.iter().take(take).cloned().collect());
@@ -146,10 +190,22 @@ fn build(
     column: &str,
     assay: Option<&str>,
     layer: Option<&str>,
+    scale: InputScale,
     output: Option<&Path>,
 ) -> Result<()> {
+    if detect_format(file)? == InputFormat::H5ad {
+        ensure!(assay.is_none(), "--assay is only valid for RDS inputs");
+        return h5ad::build(file, column, layer, scale, output);
+    }
     let parsed = parse_lazy(file)?;
-    let frame = metadata_frame(&parsed.object)?;
+    if is_sce(&parsed.object) {
+        ensure!(
+            layer.is_none(),
+            "--layer is only valid for Seurat and H5AD inputs"
+        );
+        return sce_build(&parsed, file, column, assay, scale, output);
+    }
+    let frame = seurat_metadata_frame(&parsed.object)?;
     let annotation = frame
         .columns
         .get(column)
@@ -197,63 +253,14 @@ fn build(
         matrix.cols
     );
 
-    let mut group_sizes = vec![0usize; group_names.len()];
-    for group in cell_groups.iter().flatten() {
-        group_sizes[*group] += 1;
-    }
-    ensure!(
-        group_sizes.iter().all(|size| *size > 0),
-        "annotation contains an empty factor level"
-    );
-
-    let p = read_all_integers(matrix.p, &parsed.source)?;
-    ensure!(
-        p.len() == matrix.cols + 1,
-        "invalid dgCMatrix p length {} for {} columns",
-        p.len(),
-        matrix.cols
-    );
-    ensure!(p.first() == Some(&0), "invalid dgCMatrix: p[0] is not zero");
-    ensure!(
-        p.windows(2).all(|x| x[0] <= x[1]),
-        "invalid dgCMatrix: p is not monotonic"
-    );
-    let nnz = *p.last().unwrap_or(&0);
-    ensure!(
-        nnz >= 0 && nnz as usize == matrix.i.len() && nnz as usize == matrix.x.len(),
-        "invalid dgCMatrix nonzero lengths"
-    );
-
-    let mut sums = vec![0.0f64; matrix.rows * group_names.len()];
-    let chunk_size = 1_000_000usize;
-    let mut start = 0usize;
-    let mut cell = 0usize;
-    while start < nnz as usize {
-        let count = chunk_size.min(nnz as usize - start);
-        let indices = read_integer_range(matrix.i, &parsed.source, start, count)?;
-        let values = read_real_range(matrix.x, &parsed.source, start, count)?;
-        for (offset, (&gene, &value)) in indices.iter().zip(&values).enumerate() {
-            let position = start + offset;
-            while cell + 1 < p.len() && position >= p[cell + 1] as usize {
-                cell += 1;
-            }
-            ensure!(
-                gene >= 0 && (gene as usize) < matrix.rows,
-                "dgCMatrix row index {gene} is out of bounds"
-            );
-            if let Some(group) = cell_groups[cell] {
-                let linear = if layer_name == "counts" {
-                    value
-                } else {
-                    value.exp_m1()
-                };
-                sums[gene as usize * group_names.len() + group] += linear;
-            }
-        }
-        start += count;
-    }
-
-    finish_group_means(&mut sums, &group_sizes);
+    let sums = aggregate_r_sparse(
+        &matrix,
+        &parsed.source,
+        &cell_groups,
+        group_names.len(),
+        scale,
+        layer_name,
+    )?;
 
     let output_path = output
         .map(Path::to_path_buf)
@@ -276,7 +283,411 @@ struct SparseMatrixRef<'a> {
     x: &'a VectorData<f64>,
 }
 
-fn metadata_frame(object: &RObject) -> Result<&rds2rust::DataFrameData> {
+enum DenseValuesRef<'a> {
+    Real(&'a VectorData<f64>),
+    Integer(&'a VectorData<i32>),
+}
+
+struct DenseMatrixRef<'a> {
+    rows: usize,
+    cols: usize,
+    values: DenseValuesRef<'a>,
+}
+
+fn is_sce(object: &RObject) -> bool {
+    as_s4(object, "RDS root").is_ok_and(|s4| {
+        s4.class
+            .iter()
+            .any(|class| class.as_ref() == "SingleCellExperiment")
+    })
+}
+
+fn sce_coldata(object: &RObject) -> Result<&rds2rust::S4ObjectData> {
+    let root = as_s4(object, "SingleCellExperiment")?;
+    ensure!(
+        is_sce(object),
+        "RDS object is neither Seurat nor SingleCellExperiment"
+    );
+    as_s4(
+        root.slots
+            .get("colData")
+            .ok_or_else(|| anyhow!("SingleCellExperiment has no colData slot"))?,
+        "SingleCellExperiment colData",
+    )
+}
+
+fn sce_columns(object: &RObject) -> Result<Vec<(String, &RObject)>> {
+    let frame = sce_coldata(object)?;
+    let list = frame
+        .slots
+        .get("listData")
+        .ok_or_else(|| anyhow!("SingleCellExperiment colData has no listData slot"))?;
+    let (value, attrs) = with_attributes(list)?;
+    let values = match value {
+        RObject::List(values) => values,
+        other => bail!(
+            "SingleCellExperiment colData listData decoded as {}",
+            describe(other)
+        ),
+    };
+    let names = loaded_characters(
+        attrs
+            .get("names")
+            .ok_or_else(|| anyhow!("colData has no column names"))?,
+        "colData names",
+    )?;
+    ensure!(
+        names.len() == values.len(),
+        "colData names and values have different lengths"
+    );
+    Ok(names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| (name.as_deref().unwrap_or("NA").to_owned(), value))
+        .collect())
+}
+
+fn sce_row_names(
+    object: &RObject,
+    source: &dyn RdsInput,
+    count: usize,
+) -> Result<Vec<Option<Arc<str>>>> {
+    let frame = sce_coldata(object)?;
+    let names = frame
+        .slots
+        .get("rownames")
+        .ok_or_else(|| anyhow!("SingleCellExperiment colData has no rownames"))?;
+    read_character_range(names, source, 0, count)
+}
+
+fn sce_nrows(object: &RObject) -> Result<usize> {
+    let frame = sce_coldata(object)?;
+    let values = loaded_integers(
+        frame
+            .slots
+            .get("nrows")
+            .ok_or_else(|| anyhow!("colData has no nrows slot"))?,
+        "colData nrows",
+    )?;
+    let value = *values
+        .first()
+        .ok_or_else(|| anyhow!("colData nrows is empty"))?;
+    ensure!(value >= 0, "colData nrows is negative");
+    Ok(value as usize)
+}
+
+fn sce_head(parsed: &ParsedRds, rows: usize) -> Result<()> {
+    let columns = sce_columns(&parsed.object)?;
+    let take = rows.min(sce_nrows(&parsed.object)?);
+    let row_names = sce_row_names(&parsed.object, &parsed.source, take)
+        .unwrap_or_else(|_| (1..=take).map(|i| Some(Arc::from(i.to_string()))).collect());
+    let rendered = columns
+        .iter()
+        .map(|(name, column)| {
+            render_column_range(column, &parsed.source, take)
+                .with_context(|| format!("failed to read colData column '{name}'"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    print!("cell");
+    for (name, _) in &columns {
+        print!("\t{name}");
+    }
+    println!();
+    for row in 0..take {
+        print!("{}", escape_tsv(row_names[row].as_deref().unwrap_or("NA")));
+        for column in &rendered {
+            print!("\t{}", escape_tsv(&column[row]));
+        }
+        println!();
+    }
+    Ok(())
+}
+
+fn sce_assays(object: &RObject) -> Result<&RObject> {
+    let root = as_s4(object, "SingleCellExperiment")?;
+    let assays = as_s4(
+        root.slots
+            .get("assays")
+            .ok_or_else(|| anyhow!("SingleCellExperiment has no assays slot"))?,
+        "SingleCellExperiment assays",
+    )?;
+    let data = as_s4(
+        assays
+            .slots
+            .get("data")
+            .ok_or_else(|| anyhow!("SimpleAssays has no data slot"))?,
+        "SingleCellExperiment assay list",
+    )?;
+    data.slots
+        .get("listData")
+        .ok_or_else(|| anyhow!("assay list has no listData slot"))
+}
+
+fn sce_assay_names(object: &RObject) -> Result<Vec<String>> {
+    let (_, attrs) = with_attributes(sce_assays(object)?)?;
+    Ok(loaded_characters(
+        attrs
+            .get("names")
+            .ok_or_else(|| anyhow!("SingleCellExperiment assays have no names"))?,
+        "assay names",
+    )?
+    .iter()
+    .map(|x| x.as_deref().unwrap_or("NA").to_owned())
+    .collect())
+}
+
+fn r_matrix_names(matrix: &RObject, source: &dyn RdsInput, axis: usize) -> Result<Vec<String>> {
+    let dimnames = if let Ok(s4) = as_s4(matrix, "matrix") {
+        match s4.slots.get("Dimnames") {
+            Some(RObject::List(values)) => values.as_slice(),
+            _ => bail!("SingleCellExperiment assay has no Dimnames"),
+        }
+    } else {
+        let (_, attrs) = with_attributes(matrix)?;
+        match attrs.get("dimnames") {
+            Some(RObject::List(values)) => values.as_slice(),
+            _ => bail!("SingleCellExperiment assay has no dimnames attribute"),
+        }
+    };
+    let values = dimnames
+        .get(axis)
+        .ok_or_else(|| anyhow!("assay Dimnames is incomplete"))?;
+    Ok(read_all_characters(values, source)?
+        .into_iter()
+        .map(|x| x.as_deref().unwrap_or("NA").to_owned())
+        .collect())
+}
+
+fn sce_build(
+    parsed: &ParsedRds,
+    file: &Path,
+    column: &str,
+    assay: Option<&str>,
+    scale: InputScale,
+    output: Option<&Path>,
+) -> Result<()> {
+    let columns = sce_columns(&parsed.object)?;
+    let annotation = columns
+        .iter()
+        .find(|(name, _)| name == column)
+        .map(|(_, value)| *value)
+        .ok_or_else(|| anyhow!("colData column '{column}' does not exist"))?;
+    let (group_names, cell_groups) = read_groups(annotation, &parsed.source)?;
+    ensure!(
+        !group_names.is_empty(),
+        "colData column '{column}' has no non-missing groups"
+    );
+
+    let assay_names = sce_assay_names(&parsed.object)?;
+    let default_assay = if assay_names.iter().any(|name| name == "logcounts") {
+        "logcounts"
+    } else if assay_names.iter().any(|name| name == "counts") {
+        "counts"
+    } else {
+        assay_names
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| anyhow!("SingleCellExperiment has no assays"))?
+    };
+    let assay_name = assay.unwrap_or(default_assay);
+    let matrix_object = named_item(sce_assays(&parsed.object)?, assay_name)
+        .with_context(|| format!("assay '{assay_name}' does not exist"))?;
+    let feature_names = r_matrix_names(matrix_object, &parsed.source, 0)?;
+    let sums = if let Ok(matrix) = sparse_matrix(matrix_object) {
+        ensure!(
+            matrix.cols == cell_groups.len(),
+            "assay has {} cells but colData has {}",
+            matrix.cols,
+            cell_groups.len()
+        );
+        ensure!(
+            feature_names.len() == matrix.rows,
+            "assay feature names do not match matrix rows"
+        );
+        aggregate_r_sparse(
+            &matrix,
+            &parsed.source,
+            &cell_groups,
+            group_names.len(),
+            scale,
+            assay_name,
+        )?
+    } else {
+        let matrix = dense_matrix(matrix_object)?;
+        ensure!(
+            matrix.cols == cell_groups.len(),
+            "assay has {} cells but colData has {}",
+            matrix.cols,
+            cell_groups.len()
+        );
+        ensure!(
+            feature_names.len() == matrix.rows,
+            "assay feature names do not match matrix rows"
+        );
+        aggregate_r_dense(
+            &matrix,
+            &parsed.source,
+            &cell_groups,
+            group_names.len(),
+            scale,
+            assay_name,
+        )?
+    };
+
+    let output_path = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_output(file));
+    write_reference(&output_path, &feature_names, &group_names, &sums)?;
+    eprintln!(
+        "wrote {} features x {} groups to {}",
+        feature_names.len(),
+        group_names.len(),
+        output_path.display()
+    );
+    Ok(())
+}
+
+fn dense_matrix(object: &RObject) -> Result<DenseMatrixRef<'_>> {
+    let (value, attrs) = with_attributes(object)?;
+    let dims = loaded_integers(
+        attrs
+            .get("dim")
+            .ok_or_else(|| anyhow!("dense matrix has no dim attribute"))?,
+        "dense matrix dimensions",
+    )?;
+    ensure!(
+        dims.len() == 2 && dims[0] >= 0 && dims[1] >= 0,
+        "invalid dense matrix dimensions"
+    );
+    let values = match value {
+        RObject::Real(values) => DenseValuesRef::Real(values),
+        RObject::Integer(values) => DenseValuesRef::Integer(values),
+        other => bail!("dense assay decoded as {}, not numeric", describe(other)),
+    };
+    let rows = dims[0] as usize;
+    let cols = dims[1] as usize;
+    let len = match values {
+        DenseValuesRef::Real(values) => values.len(),
+        DenseValuesRef::Integer(values) => values.len(),
+    };
+    ensure!(
+        len == rows * cols,
+        "dense matrix dimensions do not match its values"
+    );
+    Ok(DenseMatrixRef { rows, cols, values })
+}
+
+fn aggregate_r_dense(
+    matrix: &DenseMatrixRef<'_>,
+    source: &dyn RdsInput,
+    cell_groups: &[Option<usize>],
+    group_count: usize,
+    scale: InputScale,
+    matrix_name: &str,
+) -> Result<Vec<f64>> {
+    let mut group_sizes = vec![0usize; group_count];
+    for group in cell_groups.iter().flatten() {
+        group_sizes[*group] += 1;
+    }
+    ensure!(
+        group_sizes.iter().all(|size| *size > 0),
+        "annotation contains an empty factor level"
+    );
+    let mut sums = vec![0.0; matrix.rows * group_count];
+    for (cell, group) in cell_groups.iter().copied().enumerate() {
+        let Some(group) = group else { continue };
+        match matrix.values {
+            DenseValuesRef::Real(values) => {
+                for (feature, value) in
+                    read_real_range(values, source, cell * matrix.rows, matrix.rows)?
+                        .into_iter()
+                        .enumerate()
+                {
+                    sums[feature * group_count + group] += to_linear(value, scale, matrix_name);
+                }
+            }
+            DenseValuesRef::Integer(values) => {
+                for (feature, value) in
+                    read_integer_range(values, source, cell * matrix.rows, matrix.rows)?
+                        .into_iter()
+                        .enumerate()
+                {
+                    ensure!(value != i32::MIN, "dense integer assay contains NA");
+                    sums[feature * group_count + group] +=
+                        to_linear(value as f64, scale, matrix_name);
+                }
+            }
+        }
+    }
+    finish_group_means(&mut sums, &group_sizes);
+    Ok(sums)
+}
+
+fn aggregate_r_sparse(
+    matrix: &SparseMatrixRef<'_>,
+    source: &dyn RdsInput,
+    cell_groups: &[Option<usize>],
+    group_count: usize,
+    scale: InputScale,
+    matrix_name: &str,
+) -> Result<Vec<f64>> {
+    let mut group_sizes = vec![0usize; group_count];
+    for group in cell_groups.iter().flatten() {
+        group_sizes[*group] += 1;
+    }
+    ensure!(
+        group_sizes.iter().all(|size| *size > 0),
+        "annotation contains an empty factor level"
+    );
+    let p = read_all_integers(matrix.p, source)?;
+    ensure!(p.len() == matrix.cols + 1, "invalid dgCMatrix p length");
+    ensure!(
+        p.first() == Some(&0) && p.windows(2).all(|x| x[0] <= x[1]),
+        "invalid dgCMatrix column pointers"
+    );
+    let nnz = *p.last().unwrap_or(&0);
+    ensure!(
+        nnz >= 0 && nnz as usize == matrix.i.len() && nnz as usize == matrix.x.len(),
+        "invalid dgCMatrix nonzero lengths"
+    );
+
+    let mut sums = vec![0.0f64; matrix.rows * group_count];
+    let mut start = 0usize;
+    let mut cell = 0usize;
+    while start < nnz as usize {
+        let count = 1_000_000usize.min(nnz as usize - start);
+        let indices = read_integer_range(matrix.i, source, start, count)?;
+        let values = read_real_range(matrix.x, source, start, count)?;
+        for (offset, (&gene, &value)) in indices.iter().zip(&values).enumerate() {
+            let position = start + offset;
+            while cell + 1 < p.len() && position >= p[cell + 1] as usize {
+                cell += 1;
+            }
+            ensure!(
+                gene >= 0 && (gene as usize) < matrix.rows,
+                "dgCMatrix row index {gene} is out of bounds"
+            );
+            if let Some(group) = cell_groups[cell] {
+                sums[gene as usize * group_count + group] += to_linear(value, scale, matrix_name);
+            }
+        }
+        start += count;
+    }
+    finish_group_means(&mut sums, &group_sizes);
+    Ok(sums)
+}
+
+fn to_linear(value: f64, scale: InputScale, name: &str) -> f64 {
+    match scale {
+        InputScale::Linear => value,
+        InputScale::Log1p => value.exp_m1(),
+        InputScale::Auto if name.eq_ignore_ascii_case("counts") => value,
+        InputScale::Auto => value.exp_m1(),
+    }
+}
+
+fn seurat_metadata_frame(object: &RObject) -> Result<&rds2rust::DataFrameData> {
     match seurat_slot(object, "meta.data")? {
         RObject::DataFrame(frame) => Ok(frame),
         other => bail!(

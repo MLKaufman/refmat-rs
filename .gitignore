@@ -5,4 +5,8 @@ renv/library/
 *.refmat.tsv
 
 .DS_Store
-/testdata
+/testdata/*
+!/testdata/sce.rds
+!/testdata/sce.expected.tsv
+!/testdata/anndata.h5ad
+!/testdata/anndata.expected.tsv
