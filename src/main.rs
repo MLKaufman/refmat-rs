@@ -178,8 +178,7 @@ fn head(file: &Path, rows: usize) -> Result<()> {
         .iter()
         .map(|name| name.as_deref().unwrap_or("NA").to_owned())
         .collect::<Vec<_>>();
-    print_table(
-        "cell",
+    print_metadata_table(
         &row_names,
         frame.columns.keys().map(|name| name.as_ref()),
         &rendered,
@@ -420,8 +419,7 @@ fn sce_head(parsed: &ParsedRds, rows: usize) -> Result<()> {
         .iter()
         .map(|name| name.as_deref().unwrap_or("NA").to_owned())
         .collect::<Vec<_>>();
-    print_table(
-        "cell",
+    print_metadata_table(
         &row_names,
         columns.iter().map(|(name, _)| name.as_str()),
         &rendered,
@@ -1206,6 +1204,84 @@ fn print_table<'a>(
     print!("{output}");
 }
 
+const METADATA_TABLE_WIDTH: usize = 120;
+
+fn print_metadata_table<'a>(
+    row_names: &[String],
+    column_names: impl IntoIterator<Item = &'a str>,
+    columns: &[Vec<String>],
+) {
+    let column_names = column_names.into_iter().collect::<Vec<_>>();
+    if columns.is_empty() {
+        print_table("cell", row_names, std::iter::empty(), columns);
+        return;
+    }
+    let ranges = metadata_column_ranges(row_names, &column_names, columns, METADATA_TABLE_WIDTH);
+    let split = ranges.len() > 1;
+
+    for (block, range) in ranges.into_iter().enumerate() {
+        if block > 0 {
+            println!();
+        }
+        if split {
+            println!(
+                "Metadata columns {}-{} of {}:",
+                range.start + 1,
+                range.end,
+                columns.len()
+            );
+        }
+        print_table(
+            "cell",
+            row_names,
+            column_names[range.clone()].iter().copied(),
+            &columns[range],
+        );
+    }
+}
+
+fn metadata_column_ranges(
+    row_names: &[String],
+    column_names: &[&str],
+    columns: &[Vec<String>],
+    max_width: usize,
+) -> Vec<std::ops::Range<usize>> {
+    debug_assert_eq!(column_names.len(), columns.len());
+    if columns.is_empty() {
+        return Vec::new();
+    }
+
+    let row_width = row_names
+        .iter()
+        .map(|value| display_width(value))
+        .max()
+        .unwrap_or(0)
+        .max("cell".len());
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < columns.len() {
+        let mut end = start;
+        let mut width = row_width + 4;
+        while end < columns.len() {
+            let column_width = columns[end]
+                .iter()
+                .map(|value| display_width(value))
+                .max()
+                .unwrap_or(0)
+                .max(display_width(column_names[end]));
+            let added = column_width + 3;
+            if end > start && width + added > max_width {
+                break;
+            }
+            width += added;
+            end += 1;
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
 fn print_group_counts(column: &str, group_names: &[String], cell_groups: &[Option<usize>]) {
     let mut counts = vec![0usize; group_names.len()];
     for group in cell_groups.iter().flatten() {
@@ -1398,5 +1474,20 @@ mod tests {
     #[test]
     fn escapes_tsv_control_characters() {
         assert_eq!(escape_tsv("a\tb\nc\r"), "a b c ");
+    }
+
+    #[test]
+    fn splits_wide_metadata_into_readable_column_blocks() {
+        let rows = vec!["Cell1".to_owned()];
+        let names = ["one", "two", "three"];
+        let columns = vec![
+            vec!["1234".to_owned()],
+            vec!["1234".to_owned()],
+            vec!["1234".to_owned()],
+        ];
+        assert_eq!(
+            metadata_column_ranges(&rows, &names, &columns, 25),
+            vec![0..2, 2..3]
+        );
     }
 }

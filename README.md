@@ -73,6 +73,9 @@ refmat head sce.rds
 refmat head sample.h5ad
 ```
 
+When an object has many metadata columns, `head` splits them into labeled,
+terminal-sized table blocks and repeats the cell identifier in each block.
+
 Count cells for each value in a cell metadata column:
 
 ```bash

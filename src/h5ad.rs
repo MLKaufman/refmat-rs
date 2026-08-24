@@ -6,8 +6,8 @@ use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5::{Dataset, File, Group, LocationType};
 
 use crate::{
-    InputScale, default_output, finish_group_means, print_group_counts, print_table, to_linear,
-    write_reference,
+    InputScale, default_output, finish_group_means, print_group_counts, print_metadata_table,
+    to_linear, write_reference,
 };
 
 pub(crate) fn inspect(path: &Path, _depth: usize) -> Result<()> {
@@ -52,8 +52,7 @@ pub(crate) fn head(path: &Path, rows: usize) -> Result<()> {
                 .with_context(|| format!("failed to read obs column '{name}'"))
         })
         .collect::<Result<Vec<_>>>()?;
-    print_table(
-        "cell",
+    print_metadata_table(
         &names[..take],
         columns.iter().map(String::as_str),
         &rendered,
