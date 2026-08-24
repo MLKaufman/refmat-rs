@@ -64,13 +64,21 @@ refmat inspect testdata/so.rds
 refmat inspect sample.h5ad
 ```
 
-Print cell metadata as TSV:
+Print cell metadata as a readable, aligned table:
 
 ```bash
 refmat head testdata/so.rds
 refmat head testdata/so.rds -n 20
 refmat head sce.rds
 refmat head sample.h5ad
+```
+
+Count cells for each value in a cell metadata column:
+
+```bash
+refmat col testdata/so.rds celltypes
+refmat col sce.rds cell_type
+refmat col sample.h5ad cell_type
 ```
 
 Build a reference matrix from the active assay's normalized `data` layer:

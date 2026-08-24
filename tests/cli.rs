@@ -70,8 +70,21 @@ fn detects_and_prints_sce_and_h5ad_metadata() {
         let path = fixture(input);
         let output = run(&["head", path.to_str().unwrap(), "-n", "2"]);
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.starts_with("cell\tcell_type\tbatch\tscore"));
-        assert!(stdout.contains("Cell1\tT cell\tone\t0.1"));
+        assert!(stdout.contains("| cell  | cell_type | batch | score |"));
+        assert!(stdout.contains("| Cell1 | T cell    | one   | 0.1   |"));
+        assert!(stdout.lines().all(|line| !line.contains('\t')));
+    }
+}
+
+#[test]
+fn counts_cells_by_metadata_column() {
+    for input in ["sce.rds", "anndata.h5ad"] {
+        let path = fixture(input);
+        let output = run(&["col", path.to_str().unwrap(), "cell_type"]);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("| cell_type | cells |"));
+        assert!(stdout.contains("| T cell    | 2     |"));
+        assert!(stdout.contains("| B cell    | 2     |"));
     }
 }
 

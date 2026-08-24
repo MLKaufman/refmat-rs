@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,8 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 6)]
         rows: usize,
     },
+    /// Count cells by the values in a metadata column.
+    Col { file: PathBuf, column: String },
     /// Build a genes-by-group reference matrix.
     Build {
         file: PathBuf,
@@ -71,6 +74,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Inspect { file, depth, full } => inspect(&file, depth, full),
         Command::Head { file, rows } => head(&file, rows),
+        Command::Col { file, column } => col(&file, &column),
         Command::Build {
             file,
             column,
@@ -170,18 +174,41 @@ fn head(file: &Path, rows: usize) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    print!("cell");
-    for name in frame.columns.keys() {
-        print!("\t{name}");
+    let row_names = row_names
+        .iter()
+        .map(|name| name.as_deref().unwrap_or("NA").to_owned())
+        .collect::<Vec<_>>();
+    print_table(
+        "cell",
+        &row_names,
+        frame.columns.keys().map(|name| name.as_ref()),
+        &rendered,
+    );
+    Ok(())
+}
+
+fn col(file: &Path, column: &str) -> Result<()> {
+    if detect_format(file)? == InputFormat::H5ad {
+        return h5ad::col(file, column);
     }
-    println!();
-    for row in 0..take {
-        print!("{}", escape_tsv(row_names[row].as_deref().unwrap_or("NA")));
-        for column in &rendered {
-            print!("\t{}", escape_tsv(&column[row]));
-        }
-        println!();
-    }
+    let parsed = parse_lazy(file)?;
+    let annotation = if is_sce(&parsed.object) {
+        sce_columns(&parsed.object)?
+            .into_iter()
+            .find_map(|(name, values)| (name == column).then_some(values))
+            .ok_or_else(|| anyhow!("colData column '{column}' does not exist"))?
+    } else {
+        seurat_metadata_frame(&parsed.object)?
+            .columns
+            .get(column)
+            .ok_or_else(|| anyhow!("metadata column '{column}' does not exist"))?
+    };
+    let (group_names, cell_groups) = read_groups(annotation, &parsed.source)?;
+    ensure!(
+        !group_names.is_empty(),
+        "metadata column '{column}' has no non-missing groups"
+    );
+    print_group_counts(column, &group_names, &cell_groups);
     Ok(())
 }
 
@@ -389,18 +416,16 @@ fn sce_head(parsed: &ParsedRds, rows: usize) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    print!("cell");
-    for (name, _) in &columns {
-        print!("\t{name}");
-    }
-    println!();
-    for row in 0..take {
-        print!("{}", escape_tsv(row_names[row].as_deref().unwrap_or("NA")));
-        for column in &rendered {
-            print!("\t{}", escape_tsv(&column[row]));
-        }
-        println!();
-    }
+    let row_names = row_names
+        .iter()
+        .map(|name| name.as_deref().unwrap_or("NA").to_owned())
+        .collect::<Vec<_>>();
+    print_table(
+        "cell",
+        &row_names,
+        columns.iter().map(|(name, _)| name.as_str()),
+        &rendered,
+    );
     Ok(())
 }
 
@@ -1131,6 +1156,95 @@ fn write_reference(
 
 fn escape_tsv(value: &str) -> String {
     value.replace(['\t', '\n', '\r'], " ")
+}
+
+fn print_table<'a>(
+    row_header: &str,
+    row_names: &[String],
+    column_names: impl IntoIterator<Item = &'a str>,
+    columns: &[Vec<String>],
+) {
+    let column_names = column_names.into_iter().collect::<Vec<_>>();
+    debug_assert_eq!(column_names.len(), columns.len());
+    debug_assert!(columns.iter().all(|column| column.len() == row_names.len()));
+
+    let mut widths = Vec::with_capacity(columns.len() + 1);
+    widths.push(
+        row_names
+            .iter()
+            .map(|value| display_width(value))
+            .max()
+            .unwrap_or(0)
+            .max(display_width(row_header)),
+    );
+    widths.extend(column_names.iter().zip(columns).map(|(name, values)| {
+        values
+            .iter()
+            .map(|value| display_width(value))
+            .max()
+            .unwrap_or(0)
+            .max(display_width(name))
+    }));
+
+    let mut output = String::new();
+    write_table_rule(&mut output, &widths);
+    write_table_row(
+        &mut output,
+        std::iter::once(row_header).chain(column_names.iter().copied()),
+        &widths,
+    );
+    write_table_rule(&mut output, &widths);
+    for row in 0..row_names.len() {
+        write_table_row(
+            &mut output,
+            std::iter::once(row_names[row].as_str())
+                .chain(columns.iter().map(|column| column[row].as_str())),
+            &widths,
+        );
+    }
+    write_table_rule(&mut output, &widths);
+    print!("{output}");
+}
+
+fn print_group_counts(column: &str, group_names: &[String], cell_groups: &[Option<usize>]) {
+    let mut counts = vec![0usize; group_names.len()];
+    for group in cell_groups.iter().flatten() {
+        if let Some(count) = counts.get_mut(*group) {
+            *count += 1;
+        }
+    }
+    let counts = counts
+        .into_iter()
+        .map(|count| count.to_string())
+        .collect::<Vec<_>>();
+    print_table(column, group_names, ["cells"], &[counts]);
+}
+
+fn display_width(value: &str) -> usize {
+    escape_tsv(value).chars().count()
+}
+
+fn write_table_rule(output: &mut String, widths: &[usize]) {
+    output.push('+');
+    for width in widths {
+        output.push_str(&"-".repeat(width + 2));
+        output.push('+');
+    }
+    output.push('\n');
+}
+
+fn write_table_row<'a>(
+    output: &mut String,
+    values: impl IntoIterator<Item = &'a str>,
+    widths: &[usize],
+) {
+    output.push('|');
+    for (value, width) in values.into_iter().zip(widths) {
+        let value = escape_tsv(value);
+        let padding = width.saturating_sub(value.chars().count());
+        let _ = write!(output, " {value}{} |", " ".repeat(padding));
+    }
+    output.push('\n');
 }
 
 fn finish_group_means(sums: &mut [f64], group_sizes: &[usize]) {

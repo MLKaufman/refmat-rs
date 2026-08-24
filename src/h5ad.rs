@@ -6,7 +6,8 @@ use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5::{Dataset, File, Group, LocationType};
 
 use crate::{
-    InputScale, default_output, escape_tsv, finish_group_means, to_linear, write_reference,
+    InputScale, default_output, finish_group_means, print_group_counts, print_table, to_linear,
+    write_reference,
 };
 
 pub(crate) fn inspect(path: &Path, _depth: usize) -> Result<()> {
@@ -51,18 +52,25 @@ pub(crate) fn head(path: &Path, rows: usize) -> Result<()> {
                 .with_context(|| format!("failed to read obs column '{name}'"))
         })
         .collect::<Result<Vec<_>>>()?;
-    print!("cell");
-    for name in &columns {
-        print!("\t{name}");
-    }
-    println!();
-    for row in 0..take {
-        print!("{}", escape_tsv(&names[row]));
-        for values in &rendered {
-            print!("\t{}", escape_tsv(&values[row]));
-        }
-        println!();
-    }
+    print_table(
+        "cell",
+        &names[..take],
+        columns.iter().map(String::as_str),
+        &rendered,
+    );
+    Ok(())
+}
+
+pub(crate) fn col(path: &Path, name: &str) -> Result<()> {
+    let file = open(path)?;
+    validate_root(&file)?;
+    let obs = file.group("obs").context("H5AD has no /obs dataframe")?;
+    let (group_names, cell_groups) = read_groups(&obs, name)?;
+    ensure!(
+        !group_names.is_empty(),
+        "obs column '{name}' has no non-missing groups"
+    );
+    print_group_counts(name, &group_names, &cell_groups);
     Ok(())
 }
 
