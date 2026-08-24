@@ -127,7 +127,7 @@ required; refmat never selects an arbitrary object from the working directory.
 
 ## Distribution
 
-`cargo install --git https://github.com/MLKaufman/refmat.git --locked` builds a
+`cargo install --git https://github.com/MLKaufman/refmat-rs.git --locked` builds a
 static-HDF5 executable from the repository. Building requires Rust 1.85+, CMake,
 and a C compiler, but running the resulting executable has no R, Python, or
 system-HDF5 dependency.

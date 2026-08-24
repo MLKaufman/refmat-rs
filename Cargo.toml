@@ -4,6 +4,8 @@ version = "1.0.0"
 edition = "2024"
 description = "Build reference matrices from Seurat, SingleCellExperiment, and AnnData objects"
 license = "MIT"
+repository = "https://github.com/MLKaufman/refmat-rs"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0"

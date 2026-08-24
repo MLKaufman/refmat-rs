@@ -1,197 +1,251 @@
 # refmat
 
-`refmat` is an experimental standalone Rust CLI for inspecting single-cell
-objects and generating genes-by-cell-type reference matrices without requiring
-R or Python at runtime.
+`refmat` is a standalone command-line tool for inspecting single-cell objects
+and building genes-by-cell-type reference expression matrices. It reads Seurat,
+SingleCellExperiment, and AnnData files directly, without requiring R or Python
+at runtime. The GitHub repository is named `refmat-rs`; the installed executable
+and all CLI commands remain `refmat`.
 
-Input format and object type are detected automatically. The current prototype
-supports:
+## Highlights
 
-- Seurat v5 objects in RDS files with in-memory `Assay5` `dgCMatrix` layers
-- Bioconductor `SingleCellExperiment` objects in RDS files with in-memory dense
-  numeric or `dgCMatrix` assays
-- Scanpy/AnnData H5AD files with dense, CSR, or CSC `X`/layers, including gzip
-  and LZF compression
+- Automatically detects Seurat and SingleCellExperiment RDS files and AnnData
+  H5AD files from their contents.
+- Previews cell metadata in readable, terminal-sized tables.
+- Counts cells by a categorical or character metadata column.
+- Aggregates dense and sparse expression matrices with bounded memory use.
+- Produces a clustifyr-compatible genes-by-group TSV reference matrix.
 
-## Build
+## Supported inputs
+
+| Input | Cell metadata | Expression matrices |
+| --- | --- | --- |
+| Seurat v5 RDS | `meta.data` | In-memory `Assay5` `dgCMatrix` layers |
+| SingleCellExperiment RDS | `colData` | Dense integer/double matrices and `dgCMatrix` assays |
+| AnnData H5AD | `obs` | Dense, CSR, or CSC `X` and named layers, with gzip or LZF compression |
+
+File type detection is content-based; the filename extension does not determine
+whether an input is treated as H5AD or RDS.
+
+## Installation
+
+Install the `v1.0.0` release directly from GitHub:
 
 ```bash
-cargo build --release
+cargo install \
+  --git https://github.com/MLKaufman/refmat-rs.git \
+  --tag v1.0.0 \
+  --locked
 ```
 
-The executable is `target/release/refmat`.
+To replace an existing installation, add `--force`:
+
+```bash
+cargo install \
+  --git https://github.com/MLKaufman/refmat-rs.git \
+  --tag v1.0.0 \
+  --locked \
+  --force
+```
 
 Building requires Rust 1.85 or newer, CMake, and a C compiler. HDF5, gzip/LZF,
-and the RDS xz decoder are built into the executable; system HDF5 and liblzma
-installations are not required.
+and the RDS xz decoder are built into the executable, so running the installed
+binary does not require R, Python, a system HDF5 installation, or liblzma.
 
-## Install
-
-From a local clone of this repository:
-
-```bash
-cargo install --path .
-```
-
-This builds an optimized binary and installs `refmat` into Cargo's binary
-directory, normally `~/.cargo/bin`. Make sure that directory is included in
-your `PATH`, then confirm the installation:
+Confirm the installation:
 
 ```bash
 refmat --version
+# refmat 1.0.0
 ```
 
-Install directly from GitHub without cloning the repository first:
+To build from a local clone instead:
 
 ```bash
-cargo install --git https://github.com/MLKaufman/refmat.git --locked
+git clone https://github.com/MLKaufman/refmat-rs.git
+cd refmat-rs
+cargo build --release
 ```
 
-The `--locked` option uses the dependency versions recorded in `Cargo.lock` for
-a reproducible build. Re-run the same command with `--force` to replace an
-existing installation:
+The resulting executable is `target/release/refmat`. You can also install the
+local checkout with `cargo install --path . --locked`.
+
+## Quick start
 
 ```bash
-cargo install --git https://github.com/MLKaufman/refmat.git --locked --force
-```
-
-## Commands
-
-Inspect an object without loading its expression matrix into memory:
-
-```bash
-refmat inspect testdata/so.rds
+# Summarize an object.
 refmat inspect sample.h5ad
-```
 
-Print cell metadata as a readable, aligned table:
-
-```bash
-refmat head testdata/so.rds
-refmat head testdata/so.rds -n 20
-refmat head sce.rds
+# Preview six rows of cell metadata.
 refmat head sample.h5ad
-```
 
-When an object has many metadata columns, `head` splits them into labeled,
-terminal-sized table blocks and repeats the cell identifier in each block.
-
-Count cells for each value in a cell metadata column:
-
-```bash
-refmat col testdata/so.rds celltypes
-refmat col sce.rds cell_type
+# Count cells by annotation.
 refmat col sample.h5ad cell_type
-```
 
-Build a reference matrix from the active assay's normalized `data` layer:
-
-```bash
-refmat build testdata/so.rds --column celltypes
-```
-
-The same command works for a `SingleCellExperiment` or AnnData file:
-
-```bash
-refmat build sce.rds --column cell_type
+# Build sample.refmat.tsv from that annotation.
 refmat build sample.h5ad --column cell_type
 ```
 
-Defaults are format-aware:
+Run `refmat --help` or `refmat <COMMAND> --help` for the complete CLI help.
 
-- Seurat: active assay and its `data` layer
-- SingleCellExperiment: `logcounts`, then `counts`, then the first assay
-- AnnData: `X`
+## Commands
 
-The default output is `testdata/so.refmat.tsv`. Assay, layer, and output can be
-selected explicitly:
+### Inspect an object
 
 ```bash
-refmat build testdata/so.rds \
+refmat inspect <FILE>
+refmat inspect <FILE> --depth 6
+```
+
+`inspect` summarizes the serialized object without loading its expression
+matrix into memory. For small diagnostic RDS files, `--full` materializes all
+vectors.
+
+### Preview cell metadata
+
+```bash
+refmat head <FILE>
+refmat head <FILE> --rows 20
+```
+
+The default is six cells. Small metadata frames print as one aligned table;
+wide frames are split into labeled table blocks that repeat the cell identifier
+and remain readable in a terminal.
+
+### Count cells by metadata value
+
+```bash
+refmat col <FILE> <COLUMN>
+```
+
+For example:
+
+```bash
+refmat col sample.h5ad cell_type
+```
+
+```text
++-----------+-------+
+| cell_type | cells |
++-----------+-------+
+| B cell    | 2     |
+| T cell    | 2     |
++-----------+-------+
+```
+
+The grouping column must be a factor or character vector in RDS, or a
+categorical or string column in H5AD. Unused factor/category levels are shown
+with a count of zero; missing annotations are excluded.
+
+### Build a reference matrix
+
+```bash
+refmat build <FILE> --column <COLUMN>
+```
+
+Defaults depend on the input format:
+
+| Input | Default expression matrix | Overrides |
+| --- | --- | --- |
+| Seurat | Active assay, `data` layer | `--assay`, `--layer` |
+| SingleCellExperiment | `logcounts`, then `counts`, then the first assay | `--assay` |
+| AnnData | `X` | `--layer` |
+
+Select inputs and output explicitly when needed:
+
+```bash
+# Seurat
+refmat build so.rds \
   --column celltypes \
   --assay RNA \
   --layer data \
-  --output testdata/custom.refmat.tsv
+  --output custom.refmat.tsv
+
+# SingleCellExperiment
+refmat build sce.rds \
+  --column cell_type \
+  --assay logcounts
+
+# AnnData
+refmat build sample.h5ad \
+  --column cell_type \
+  --layer counts \
+  --scale linear
 ```
 
-Select a SingleCellExperiment assay or AnnData layer explicitly:
+Without `--output`, the result is written beside the input as
+`<input-stem>.refmat.tsv`. Rows are features, columns are annotation groups,
+and the first column is named `gene`.
 
-```bash
-refmat build sce.rds --column cell_type --assay logcounts
-refmat build sample.h5ad --column cell_type --layer counts
-```
+## Expression scale and aggregation
 
-For `data`, values are calculated as:
+For each feature and annotation group, `refmat` calculates:
 
 ```text
-log1p(mean(expm1(log_normalized_expression)))
+log1p(mean(linear expression))
 ```
 
-For `counts`, values are calculated as `log1p(mean(counts))`.
+Log1p-normalized input is converted with `expm1` before averaging. Linear input,
+such as raw counts, is averaged directly before `log1p` is applied.
 
-AnnData does not record whether `X` is raw or log-normalized. Automatic mode
-assumes `X` and non-`counts` assay/layer names are log1p-normalized. Override
-that interpretation when necessary:
+The default `--scale auto` treats a matrix named `counts` as linear and all
+other assay/layer names as log1p-normalized. AnnData does not record whether
+`X` contains counts or normalized values, so specify the scale when necessary:
 
 ```bash
 refmat build raw-counts.h5ad --column cell_type --scale linear
-refmat build sample.h5ad --column cell_type --layer normalized --scale log1p
+refmat build normalized.h5ad --column cell_type --scale log1p
 ```
 
-The file contents, not the filename extension, determine whether an input is
-H5AD or RDS. RDS inputs are then classified from their S4 class.
+Character annotations preserve first-seen order. R factors preserve factor
+level order, and AnnData categoricals preserve category order. Cells with
+missing annotations are excluded from the reference matrix.
 
-## Validation on the supplied fixture
+## Validation
 
-The supplied `testdata/so.rds` contains:
+The test suite includes genuine SingleCellExperiment and AnnData fixtures that
+exercise metadata decoding, dense matrices, sparse matrices, categorical group
+ordering, and automatic scale handling.
 
-- 61,844 cells
-- 32,285 features
-- `counts`, `data`, and `scale.data` layers
-- 59 cell metadata columns
-- an 18-level `celltypes` annotation
-- 135,265,589 nonzero entries in the `data` layer
-
-The release build generated the complete 32,285 × 18 reference matrix in about
-16 seconds on the development machine, including gzip decompression and RDS
-structure parsing.
-
-Comparison with the equivalent R/Matrix calculation produced:
+The Seurat implementation was additionally validated on a 61,844-cell,
+32,285-feature Seurat v5 object with 135,265,589 nonzero entries. The generated
+32,285 × 18 reference matrix matched the equivalent R/Matrix calculation:
 
 ```text
-max absolute error:  8.881784e-16
-mean absolute error: 2.137444e-18
+maximum absolute error:  8.881784e-16
+mean absolute error:     2.137444e-18
 all.equal tolerance 1e-12: TRUE
 ```
 
-Re-run that comparison with:
-
-```bash
-Rscript scripts/validate_reference.R \
-  testdata/so.rds \
-  testdata/so.refmat.tsv \
-  celltypes
-```
-
-R is used only for development validation and is not linked into the binary.
+The large validation object is not included in the repository. The comparison
+script is available at `scripts/validate_reference.R` for compatible Seurat
+objects.
 
 ## Current limitations
 
-- Seurat expression layers must currently be `dgCMatrix`; SCE supports dense
-  numeric matrices and `dgCMatrix`.
-- Metadata-to-layer alignment currently requires the layer to contain all cells
-  in Seurat metadata order.
-- Split layers are not joined automatically.
-- BPCells, DelayedArray/HDF5Array inside RDS, and external-pointer matrix
-  backends are not supported. Export those objects to an ordinary in-memory
-  assay or H5AD first.
-- H5AD `X` and named layers are supported, but `.raw/X` is not yet selectable.
-- H5AD annotation columns used for grouping must be categorical or string.
-- Character annotations preserve first-seen order; factor annotations preserve
-  R factor-level order; AnnData categoricals preserve category order.
-- Cells with missing annotations are excluded with no output column.
-- Each invocation decompresses a gzip RDS into a temporary backing file. A
-  persistent cache could improve repeated-command latency.
+- Seurat expression layers must be `dgCMatrix`; dense Seurat layers are not yet
+  supported.
+- Seurat layers must contain all cells in metadata order. Partial and split
+  layers are not aligned or joined automatically.
+- BPCells, DelayedArray/HDF5Array within RDS, and external-pointer matrix
+  backends are not supported. Export these objects to an in-memory assay or
+  H5AD first.
+- AnnData `.raw/X` is not selectable; use `X` or a named layer.
+- H5AD grouping columns must be categorical or string values.
+- Each invocation decompresses a compressed RDS into a temporary backing file;
+  repeated commands do not currently share a persistent cache.
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the architecture,
-milestones, test matrix, and distribution plan.
+## Development
+
+```bash
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+Fixture-generation and validation scripts are in `scripts/`. See
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for implementation details
+and the format-specific test matrix.
+
+## License
+
+`refmat` is licensed under the MIT License.
