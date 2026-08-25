@@ -89,6 +89,44 @@ fn counts_cells_by_metadata_column() {
 }
 
 #[test]
+fn detects_and_prints_legacy_seurat_metadata() {
+    for (input, version) in [("seurat-v3.rds", "3.2.3"), ("seurat-v4.rds", "4.4.0")] {
+        let path = fixture(input);
+
+        let inspect = run(&["inspect", path.to_str().unwrap(), "--depth", "1"]);
+        let inspect_stdout = String::from_utf8(inspect.stdout).unwrap();
+        assert!(inspect_stdout.contains(&format!("detected: Seurat {version}")));
+        assert!(inspect_stdout.contains("Assay (v3/v4 layout)"));
+
+        let head = run(&["head", path.to_str().unwrap(), "-n", "2"]);
+        let head_stdout = String::from_utf8(head.stdout).unwrap();
+        let head_stderr = String::from_utf8(head.stderr).unwrap();
+        assert!(head_stderr.contains(&format!("detected: Seurat {version}")));
+        assert!(head_stderr.contains("Assay (v3/v4 layout)"));
+        assert!(head_stdout.contains("| cell  | cell_type | batch | score |"));
+        assert!(head_stdout.contains("| Cell1 | T cell    | one   | 0.1   |"));
+
+        let col = run(&["col", path.to_str().unwrap(), "cell_type"]);
+        let col_stdout = String::from_utf8(col.stdout).unwrap();
+        assert!(col_stdout.contains("| B cell    | 2     |"));
+        assert!(col_stdout.contains("| T cell    | 2     |"));
+    }
+}
+
+#[test]
+fn builds_legacy_seurat_sparse_and_dense_layers() {
+    for input in ["seurat-v3.rds", "seurat-v4.rds"] {
+        assert_reference(input, "seurat-legacy.expected.tsv", &[]);
+        assert_reference(input, "seurat-legacy.expected.tsv", &["--layer", "counts"]);
+        assert_reference(
+            input,
+            "seurat-legacy.expected.tsv",
+            &["--layer", "scale.data"],
+        );
+    }
+}
+
+#[test]
 fn builds_sce_sparse_and_dense_assays() {
     assert_reference("sce.rds", "sce.expected.tsv", &[]);
     assert_reference(

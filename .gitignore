@@ -10,3 +10,6 @@ renv/library/
 !/testdata/sce.expected.tsv
 !/testdata/anndata.h5ad
 !/testdata/anndata.expected.tsv
+!/testdata/seurat-v3.rds
+!/testdata/seurat-v4.rds
+!/testdata/seurat-legacy.expected.tsv

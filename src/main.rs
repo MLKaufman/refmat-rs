@@ -57,8 +57,10 @@ enum Command {
         file: PathBuf,
         #[arg(short, long)]
         column: String,
+        /// Seurat or SingleCellExperiment assay name.
         #[arg(long)]
         assay: Option<String>,
+        /// Seurat or H5AD layer; also selects a legacy Assay matrix slot.
         #[arg(long)]
         layer: Option<String>,
         /// Interpretation of matrix values before group averaging.
@@ -143,10 +145,16 @@ fn inspect(file: &Path, depth: usize, full: bool) -> Result<()> {
         let object = read_rds_from_path_chunked(file)
             .with_context(|| format!("failed to parse {}", file.display()))?
             .object;
+        if is_seurat(&object) {
+            println!("{}", seurat_format_summary(&object)?);
+        }
         print_object("root", &object, 0, depth);
     } else {
         let parsed = parse_lazy(file)?;
         eprintln!("note: {} large vectors kept lazy", parsed.lazy_vectors);
+        if is_seurat(&parsed.object) {
+            println!("{}", seurat_format_summary(&parsed.object)?);
+        }
         print_object("root", &parsed.object, 0, depth);
     }
     Ok(())
@@ -160,6 +168,7 @@ fn head(file: &Path, rows: usize) -> Result<()> {
     if is_sce(&parsed.object) {
         return sce_head(&parsed, rows);
     }
+    eprintln!("{}", seurat_format_summary(&parsed.object)?);
     let frame = seurat_metadata_frame(&parsed.object)?;
     let take = rows.min(frame.row_names.len());
     let row_names = seurat_cell_names(&parsed.object, &parsed.source, take)
@@ -245,48 +254,72 @@ fn build(
     let active_assay = active_assay_name(&parsed.object)?;
     let assay_name = assay.unwrap_or(&active_assay);
     let layer_name = layer.unwrap_or("data");
-    let assay_object = named_item(seurat_slot(&parsed.object, "assays")?, assay_name)
-        .with_context(|| format!("assay '{assay_name}' does not exist"))?;
-    let assay_s4 = as_s4(assay_object, "assay")?;
-    let layer_object = named_item(
-        assay_s4
-            .slots
-            .get("layers")
-            .ok_or_else(|| anyhow!("Assay5 has no layers slot"))?,
-        layer_name,
-    )
-    .with_context(|| format!("layer '{layer_name}' does not exist in assay '{assay_name}'"))?;
-    let matrix = sparse_matrix(layer_object)?;
+    let assay_s4 = seurat_assay(&parsed.object, assay_name)?;
+    let layout = seurat_assay_layout(assay_s4)?;
+    let (matrix_object, feature_names, cell_names) = match layout {
+        SeuratAssayLayout::V5 => {
+            let matrix = named_item(
+                assay_s4
+                    .slots
+                    .get("layers")
+                    .ok_or_else(|| anyhow!("Assay5 has no layers slot"))?,
+                layer_name,
+            )
+            .with_context(|| {
+                format!("layer '{layer_name}' does not exist in assay '{assay_name}'")
+            })?;
+            let cells = layer_member_names(assay_s4, "cells", layer_name, &parsed.source)?;
+            let features = layer_member_names(assay_s4, "features", layer_name, &parsed.source)?;
+            (matrix, features, cells)
+        }
+        SeuratAssayLayout::Legacy => {
+            ensure!(
+                matches!(layer_name, "counts" | "data" | "scale.data"),
+                "legacy Assay layer must be one of counts, data, or scale.data"
+            );
+            let matrix = assay_s4
+                .slots
+                .get(layer_name)
+                .ok_or_else(|| anyhow!("legacy assay '{assay_name}' has no '{layer_name}' slot"))?;
+            let features = r_matrix_names(matrix, &parsed.source, 0)
+                .with_context(|| format!("failed to read feature names from '{layer_name}'"))?;
+            let cells = r_matrix_names(matrix, &parsed.source, 1)
+                .with_context(|| format!("failed to read cell names from '{layer_name}'"))?;
+            (matrix, features, cells)
+        }
+    };
 
-    let cell_names = layer_member_names(assay_s4, "cells", layer_name, &parsed.source)?;
-    let feature_names = layer_member_names(assay_s4, "features", layer_name, &parsed.source)?;
-    ensure!(
-        matrix.cols == cell_names.len(),
-        "layer has {} columns but its cell map selects {} cells",
-        matrix.cols,
-        cell_names.len()
-    );
-    ensure!(
-        matrix.rows == feature_names.len(),
-        "layer has {} rows but its feature map selects {} features",
-        matrix.rows,
-        feature_names.len()
-    );
-    ensure!(
-        cell_groups.len() == matrix.cols,
-        "metadata has {} cells but layer has {}; partial-layer cell alignment is not implemented yet",
-        cell_groups.len(),
-        matrix.cols
-    );
-
-    let sums = aggregate_r_sparse(
-        &matrix,
-        &parsed.source,
-        &cell_groups,
-        group_names.len(),
-        scale,
-        layer_name,
-    )?;
+    ensure_metadata_cell_order(frame, &cell_names, assay_name, layer_name)?;
+    let sums = match sparse_matrix(matrix_object) {
+        Ok(matrix) => {
+            validate_matrix_names(&matrix, &feature_names, &cell_names, layer_name)?;
+            aggregate_r_sparse(
+                &matrix,
+                &parsed.source,
+                &cell_groups,
+                group_names.len(),
+                scale,
+                layer_name,
+            )?
+        }
+        Err(sparse_error) if layout == SeuratAssayLayout::Legacy => {
+            let matrix = dense_matrix(matrix_object).with_context(|| {
+                format!(
+                    "legacy assay '{assay_name}' slot '{layer_name}' is neither dgCMatrix nor a dense numeric matrix ({sparse_error})"
+                )
+            })?;
+            validate_matrix_names(&matrix, &feature_names, &cell_names, layer_name)?;
+            aggregate_r_dense(
+                &matrix,
+                &parsed.source,
+                &cell_groups,
+                group_names.len(),
+                scale,
+                layer_name,
+            )?
+        }
+        Err(error) => return Err(error),
+    };
 
     let output_path = output
         .map(Path::to_path_buf)
@@ -318,6 +351,51 @@ struct DenseMatrixRef<'a> {
     rows: usize,
     cols: usize,
     values: DenseValuesRef<'a>,
+}
+
+trait MatrixDimensions {
+    fn rows(&self) -> usize;
+    fn cols(&self) -> usize;
+}
+
+impl MatrixDimensions for SparseMatrixRef<'_> {
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    fn cols(&self) -> usize {
+        self.cols
+    }
+}
+
+impl MatrixDimensions for DenseMatrixRef<'_> {
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    fn cols(&self) -> usize {
+        self.cols
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SeuratAssayLayout {
+    Legacy,
+    V5,
+}
+
+impl SeuratAssayLayout {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Legacy => "Assay (v3/v4 layout)",
+            Self::V5 => "Assay5 (v5 layout)",
+        }
+    }
+}
+
+fn is_seurat(object: &RObject) -> bool {
+    as_s4(object, "RDS root")
+        .is_ok_and(|s4| s4.class.iter().any(|class| class.as_ref() == "Seurat"))
 }
 
 fn is_sce(object: &RObject) -> bool {
@@ -464,22 +542,76 @@ fn r_matrix_names(matrix: &RObject, source: &dyn RdsInput, axis: usize) -> Resul
     let dimnames = if let Ok(s4) = as_s4(matrix, "matrix") {
         match s4.slots.get("Dimnames") {
             Some(RObject::List(values)) => values.as_slice(),
-            _ => bail!("SingleCellExperiment assay has no Dimnames"),
+            _ => bail!("R matrix has no Dimnames"),
         }
     } else {
         let (_, attrs) = with_attributes(matrix)?;
         match attrs.get("dimnames") {
             Some(RObject::List(values)) => values.as_slice(),
-            _ => bail!("SingleCellExperiment assay has no dimnames attribute"),
+            _ => bail!("R matrix has no dimnames attribute"),
         }
     };
     let values = dimnames
         .get(axis)
-        .ok_or_else(|| anyhow!("assay Dimnames is incomplete"))?;
+        .ok_or_else(|| anyhow!("R matrix Dimnames is incomplete"))?;
     Ok(read_all_characters(values, source)?
         .into_iter()
         .map(|x| x.as_deref().unwrap_or("NA").to_owned())
         .collect())
+}
+
+fn validate_matrix_names(
+    matrix: &impl MatrixDimensions,
+    feature_names: &[String],
+    cell_names: &[String],
+    matrix_name: &str,
+) -> Result<()> {
+    ensure!(
+        matrix.rows() == feature_names.len(),
+        "matrix '{matrix_name}' has {} rows but {} feature names",
+        matrix.rows(),
+        feature_names.len()
+    );
+    ensure!(
+        matrix.cols() == cell_names.len(),
+        "matrix '{matrix_name}' has {} columns but {} cell names",
+        matrix.cols(),
+        cell_names.len()
+    );
+    Ok(())
+}
+
+fn ensure_metadata_cell_order(
+    frame: &rds2rust::DataFrameData,
+    cell_names: &[String],
+    assay_name: &str,
+    layer_name: &str,
+) -> Result<()> {
+    ensure!(
+        frame.row_names.len() == cell_names.len(),
+        "metadata has {} cells but assay '{assay_name}' matrix '{layer_name}' has {}; partial-layer cell alignment is not implemented yet",
+        frame.row_names.len(),
+        cell_names.len()
+    );
+    let compact_row_names = frame.row_names.iter().enumerate().all(|(index, name)| {
+        name.as_deref()
+            .is_some_and(|name| name.parse::<usize>() == Ok(index + 1))
+    });
+    if compact_row_names {
+        return Ok(());
+    }
+    for (index, (metadata_name, matrix_name)) in frame.row_names.iter().zip(cell_names).enumerate()
+    {
+        let metadata_name = metadata_name
+            .as_deref()
+            .ok_or_else(|| anyhow!("metadata cell name {} is missing", index + 1))?;
+        ensure!(
+            metadata_name == matrix_name,
+            "cell order mismatch at position {}: metadata has '{metadata_name}' but assay '{assay_name}' matrix '{layer_name}' has '{matrix_name}'",
+            index + 1
+        );
+    }
+    Ok(())
 }
 
 fn sce_build(
@@ -711,6 +843,7 @@ fn to_linear(value: f64, scale: InputScale, name: &str) -> f64 {
 }
 
 fn seurat_metadata_frame(object: &RObject) -> Result<&rds2rust::DataFrameData> {
+    ensure!(is_seurat(object), "RDS object is not a Seurat object");
     match seurat_slot(object, "meta.data")? {
         RObject::DataFrame(frame) => Ok(frame),
         other => bail!(
@@ -743,6 +876,66 @@ fn active_assay_name(object: &RObject) -> Result<String> {
         .and_then(|x| x.as_deref())
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("active.assay is empty"))
+}
+
+fn seurat_assay<'a>(object: &'a RObject, name: &str) -> Result<&'a rds2rust::S4ObjectData> {
+    let assay = named_item(seurat_slot(object, "assays")?, name)
+        .with_context(|| format!("assay '{name}' does not exist"))?;
+    as_s4(assay, &format!("assay '{name}'"))
+}
+
+fn seurat_assay_layout(assay: &rds2rust::S4ObjectData) -> Result<SeuratAssayLayout> {
+    if assay
+        .class
+        .iter()
+        .any(|class| matches!(class.as_ref(), "Assay5" | "StdAssay"))
+    {
+        Ok(SeuratAssayLayout::V5)
+    } else if assay.class.iter().any(|class| class.as_ref() == "Assay") {
+        Ok(SeuratAssayLayout::Legacy)
+    } else {
+        bail!(
+            "assay class '{}' is unsupported; expected Assay or Assay5",
+            join_classes(&assay.class)
+        )
+    }
+}
+
+fn seurat_format_summary(object: &RObject) -> Result<String> {
+    ensure!(is_seurat(object), "RDS object is not a Seurat object");
+    let active_assay = active_assay_name(object)?;
+    let assay = seurat_assay(object, &active_assay)?;
+    let layout = seurat_assay_layout(assay)?;
+    let version = seurat_slot(object, "version")
+        .ok()
+        .and_then(render_package_version)
+        .unwrap_or_else(|| "unknown version".to_owned());
+    Ok(format!(
+        "detected: Seurat {version}; active assay '{active_assay}' uses {}",
+        layout.description()
+    ))
+}
+
+fn render_package_version(object: &RObject) -> Option<String> {
+    match object {
+        RObject::Integer(VectorData::Owned(values)) if !values.is_empty() => {
+            values.iter().all(|value| *value >= 0).then(|| {
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+        }
+        RObject::Character(VectorData::Owned(values)) => values
+            .first()
+            .and_then(|value| value.as_deref())
+            .map(str::to_owned),
+        RObject::List(values) if values.len() == 1 => render_package_version(&values[0]),
+        RObject::S3Object(s3) => render_package_version(&s3.base),
+        RObject::WithAttributes { object, .. } => render_package_version(object),
+        _ => None,
+    }
 }
 
 fn named_item<'a>(object: &'a RObject, wanted: &str) -> Result<&'a RObject> {
@@ -893,18 +1086,32 @@ fn seurat_cell_names(
     count: usize,
 ) -> Result<Vec<Option<Arc<str>>>> {
     let active = active_assay_name(object)?;
-    let assay = named_item(seurat_slot(object, "assays")?, &active)?;
-    let assay = as_s4(assay, "active assay")?;
-    let cells = assay
-        .slots
-        .get("cells")
-        .ok_or_else(|| anyhow!("Assay5 has no cells map"))?;
-    let (_, attrs) = with_attributes(cells)?;
-    let dimnames = match attrs.get("dimnames") {
-        Some(RObject::List(values)) => values,
-        _ => bail!("Assay5 cells map has no dimnames"),
-    };
-    read_character_range(&dimnames[0], source, 0, count)
+    let assay = seurat_assay(object, &active)?;
+    match seurat_assay_layout(assay)? {
+        SeuratAssayLayout::V5 => {
+            let cells = assay
+                .slots
+                .get("cells")
+                .ok_or_else(|| anyhow!("Assay5 has no cells map"))?;
+            let (_, attrs) = with_attributes(cells)?;
+            let dimnames = match attrs.get("dimnames") {
+                Some(RObject::List(values)) => values,
+                _ => bail!("Assay5 cells map has no dimnames"),
+            };
+            read_character_range(&dimnames[0], source, 0, count)
+        }
+        SeuratAssayLayout::Legacy => {
+            let matrix = assay
+                .slots
+                .get("data")
+                .ok_or_else(|| anyhow!("legacy Assay has no data slot"))?;
+            Ok(r_matrix_names(matrix, source, 1)?
+                .into_iter()
+                .take(count)
+                .map(|name| Some(Arc::from(name)))
+                .collect())
+        }
+    }
 }
 
 fn read_groups(

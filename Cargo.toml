@@ -1,6 +1,6 @@
 [package]
 name = "refmat"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "Build reference matrices from Seurat, SingleCellExperiment, and AnnData objects"
 license = "MIT"

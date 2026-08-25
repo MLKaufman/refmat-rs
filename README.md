@@ -19,6 +19,7 @@ and all CLI commands remain `refmat`.
 
 | Input | Cell metadata | Expression matrices |
 | --- | --- | --- |
+| Seurat v3/v4 RDS | `meta.data` | Legacy `Assay` sparse or dense `counts`, `data`, and `scale.data` slots |
 | Seurat v5 RDS | `meta.data` | In-memory `Assay5` `dgCMatrix` layers |
 | SingleCellExperiment RDS | `colData` | Dense integer/double matrices and `dgCMatrix` assays |
 | AnnData H5AD | `obs` | Dense, CSR, or CSC `X` and named layers, with gzip or LZF compression |
@@ -28,12 +29,12 @@ whether an input is treated as H5AD or RDS.
 
 ## Installation
 
-Install the `v1.0.0` release directly from GitHub:
+Install the `v1.1.0` release directly from GitHub:
 
 ```bash
 cargo install \
   --git https://github.com/MLKaufman/refmat-rs.git \
-  --tag v1.0.0 \
+  --tag v1.1.0 \
   --locked
 ```
 
@@ -42,7 +43,7 @@ To replace an existing installation, add `--force`:
 ```bash
 cargo install \
   --git https://github.com/MLKaufman/refmat-rs.git \
-  --tag v1.0.0 \
+  --tag v1.1.0 \
   --locked \
   --force
 ```
@@ -55,7 +56,7 @@ Confirm the installation:
 
 ```bash
 refmat --version
-# refmat 1.0.0
+# refmat 1.1.0
 ```
 
 To build from a local clone instead:
@@ -98,7 +99,8 @@ refmat inspect <FILE> --depth 6
 
 `inspect` summarizes the serialized object without loading its expression
 matrix into memory. For small diagnostic RDS files, `--full` materializes all
-vectors.
+vectors. Seurat inputs report their stored object version, active assay, and
+whether that assay uses the v3/v4 `Assay` layout or the v5 `Assay5` layout.
 
 ### Preview cell metadata
 
@@ -109,7 +111,8 @@ refmat head <FILE> --rows 20
 
 The default is six cells. Small metadata frames print as one aligned table;
 wide frames are split into labeled table blocks that repeat the cell identifier
-and remain readable in a terminal.
+and remain readable in a terminal. For Seurat inputs, a detection line reporting
+the stored version and active-assay layout is written to stderr.
 
 ### Count cells by metadata value
 
@@ -176,6 +179,10 @@ Without `--output`, the result is written beside the input as
 `<input-stem>.refmat.tsv`. Rows are features, columns are annotation groups,
 and the first column is named `gene`.
 
+For Seurat v3/v4 `Assay` objects, `--layer` selects the corresponding direct
+slot and must be `counts`, `data`, or `scale.data`. For Seurat v5 `Assay5`
+objects, it selects a named layer.
+
 ## Expression scale and aggregation
 
 For each feature and annotation group, `refmat` calculates:
@@ -202,9 +209,10 @@ missing annotations are excluded from the reference matrix.
 
 ## Validation
 
-The test suite includes genuine SingleCellExperiment and AnnData fixtures that
-exercise metadata decoding, dense matrices, sparse matrices, categorical group
-ordering, and automatic scale handling.
+The test suite includes structurally faithful Seurat v3/v4 fixtures and genuine
+SingleCellExperiment and AnnData fixtures. Together they exercise version and
+assay-layout detection, metadata decoding, dense matrices, sparse matrices,
+categorical group ordering, and automatic scale handling.
 
 The Seurat implementation was additionally validated on a 61,844-cell,
 32,285-feature Seurat v5 object with 135,265,589 nonzero entries. The generated
@@ -222,8 +230,8 @@ objects.
 
 ## Current limitations
 
-- Seurat expression layers must be `dgCMatrix`; dense Seurat layers are not yet
-  supported.
+- Seurat v5 `Assay5` expression layers must be `dgCMatrix`. Legacy v3/v4
+  `Assay` slots may be `dgCMatrix` or dense integer/double matrices.
 - Seurat layers must contain all cells in metadata order. Partial and split
   layers are not aligned or joined automatically.
 - BPCells, DelayedArray/HDF5Array within RDS, and external-pointer matrix

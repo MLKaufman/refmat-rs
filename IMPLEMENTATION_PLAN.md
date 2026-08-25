@@ -26,6 +26,7 @@ Format-aware defaults keep the short command useful:
 
 | Input | Metadata | Default matrix | Orientation |
 | --- | --- | --- | --- |
+| Seurat v3/v4 RDS | `meta.data` | active assay, `data` slot | features × cells |
 | Seurat v5 RDS | `meta.data` | active assay, `data` layer | features × cells |
 | SingleCellExperiment RDS | `colData` | `logcounts`, then `counts`, then first assay | features × cells |
 | AnnData H5AD | `obs` | `X` | cells × features |
@@ -59,10 +60,13 @@ a temporary backing file. Only selected metadata and matrix ranges are read.
 
 ### Seurat
 
-The adapter reads `meta.data`, `active.assay`, `assays`, and the selected
-`Assay5` layer. It reconstructs cell and feature names from the Assay5 `LogMap`
-membership maps. The current implementation accepts `dgCMatrix` and requires a
-full layer in metadata cell order.
+The adapter reads `meta.data`, `active.assay`, `assays`, and the stored object
+version. It detects each selected assay structurally. Legacy Seurat v3/v4
+`Assay` objects expose `counts`, `data`, and `scale.data` slots with matrix
+dimnames; Seurat v5 `Assay5` objects expose named layers and `LogMap` cell and
+feature membership maps. Legacy slots accept `dgCMatrix` or dense numeric
+matrices, while Assay5 layers currently accept `dgCMatrix`. Both layouts require
+a full matrix in metadata cell order.
 
 ### SingleCellExperiment
 
@@ -94,6 +98,7 @@ the only complete sparse vector held in memory.
 ```text
 refmat inspect <FILE> [--depth N] [--full]
 refmat head <FILE> [-n ROWS]
+refmat col <FILE> <COLUMN>
 refmat build <FILE> --column NAME [--assay NAME] [--layer NAME]
              [--scale auto|log1p|linear] [--output FILE]
 ```
@@ -106,6 +111,9 @@ required; refmat never selects an arbitrary object from the working directory.
 - The supplied 1.9 GB Seurat v5 object generated a 32,285 × 18 result matching
   the equivalent R/Matrix calculation to a maximum absolute error of
   `8.881784e-16`.
+- Structurally faithful Seurat v3 and v4 fixtures validate stored-version and
+  assay-layout detection, metadata display, grouping counts, sparse `counts` and
+  `data`, and dense `scale.data`.
 - A genuine Bioconductor `SingleCellExperiment` fixture validates `colData`,
   factor ordering, sparse `dgCMatrix`, dense assays, `logcounts`, and `counts`.
 - A genuine Python AnnData fixture validates categorical/string/numeric `obs`,
@@ -120,7 +128,7 @@ required; refmat never selects an arbitrary object from the working directory.
 2. Add SCE fixtures with absent dimnames, integer dense counts, and additional
    Bioconductor release versions.
 3. Align cells by identifier rather than requiring positional equality.
-4. Add Seurat v4, split-layer, and partial-layer support.
+4. Add Seurat split-layer and partial-layer support.
 5. Add output allocation limits, malformed-file tests, and atomic output writes.
 6. Publish prebuilt macOS/Linux binaries and checksums so end users do not need
    the Rust/CMake build toolchain.
