@@ -1,10 +1,23 @@
 # refmat
 
+<center><img src="logo.png" alt="refmat logo" width="50%" /></center> 
+
 `refmat` is a standalone command-line tool for inspecting single-cell objects
-and building genes-by-cell-type reference expression matrices. It reads Seurat,
-SingleCellExperiment, and AnnData files directly, without requiring R or Python
-at runtime. The GitHub repository is named `refmat-rs`; the installed executable
-and all CLI commands remain `refmat`.
+and building genes-by-cell-type reference expression matrices. 
+
+<center><b> Reads Seurat, SingleCellExperiment, and AnnData files directly, without requiring R or Python
+at runtime. </center></b>
+
+## Why
+
+`refmat` was created to provide a fast, efficient way to build cell-type reference expression matrices from single-cell data without the overhead of running R or Python scripts. This makes it ideal for use in automated pipelines and for users who want to avoid the complexity of managing and maintaining R or Python environments.
+
+**Want to explore existing single-cell dataset objects, quickly summarize their contents, and generate reference matrices for downstream cell type annotation analysis?**
+
+This  tool to makes it easy to do all of that from the command line, with minimal dependencies and maximum speed.
+
+To help support this workflow during single-cell analysis:  
+**Single Cell Experiment Object -> Reference Matrix -> ClustifyR -> Cell Type Annotation**
 
 ## Highlights
 
@@ -24,12 +37,14 @@ and all CLI commands remain `refmat`.
 | SingleCellExperiment RDS | `colData` | Dense integer/double matrices and `dgCMatrix` assays |
 | AnnData H5AD | `obs` | Dense, CSR, or CSC `X` and named layers, with gzip or LZF compression |
 
-File type detection is content-based; the filename extension does not determine
-whether an input is treated as H5AD or RDS.
+*File type detection is content-based; the filename extension does not determine
+whether an input is treated as H5AD or RDS.*
 
 ## Installation
 
-Install the `v1.1.0` release directly from GitHub:
+### Source via Cargo
+
+Install the latest release directly from GitHub:
 
 ```bash
 cargo install \
@@ -38,52 +53,30 @@ cargo install \
   --locked
 ```
 
-To replace an existing installation, add `--force`:
-
-```bash
-cargo install \
-  --git https://github.com/MLKaufman/refmat-rs.git \
-  --tag v1.1.0 \
-  --locked \
-  --force
-```
-
-Building requires Rust 1.85 or newer, CMake, and a C compiler. HDF5, gzip/LZF,
+*Note: Building requires Rust 1.85 or newer, CMake, and a C compiler. HDF5, gzip/LZF,
 and the RDS xz decoder are built into the executable, so running the installed
-binary does not require R, Python, a system HDF5 installation, or liblzma.
+binary does not require R, Python, a system HDF5 installation, or liblzma.*
 
-Confirm the installation:
+### Prebuilt binaries
 
-```bash
-refmat --version
-# refmat 1.1.0
-```
+Download the latest release for your platform from the [GitHub releases page](https://github.com/MLKaufman/refmat-rs/releases).
 
-To build from a local clone instead:
-
-```bash
-git clone https://github.com/MLKaufman/refmat-rs.git
-cd refmat-rs
-cargo build --release
-```
-
-The resulting executable is `target/release/refmat`. You can also install the
-local checkout with `cargo install --path . --locked`.
+Prebuilt binaries are available for Linux, and ARM-based macOS. After downloading, add the binary to your PATH.
 
 ## Quick start
 
 ```bash
 # Summarize an object.
-refmat inspect sample.h5ad
+refmat inspect so.rds
 
 # Preview six rows of cell metadata.
-refmat head sample.h5ad
+refmat head so.rds
 
 # Count cells by annotation.
-refmat col sample.h5ad cell_type
+refmat col so.rds cell_type
 
 # Build sample.refmat.tsv from that annotation.
-refmat build sample.h5ad --column cell_type
+refmat build so.rds --column cell_type
 ```
 
 Run `refmat --help` or `refmat <COMMAND> --help` for the complete CLI help.
@@ -123,7 +116,7 @@ refmat col <FILE> <COLUMN>
 For example:
 
 ```bash
-refmat col sample.h5ad cell_type
+refmat col so.rds cell_type
 ```
 
 ```text
@@ -241,18 +234,6 @@ objects.
 - H5AD grouping columns must be categorical or string values.
 - Each invocation decompresses a compressed RDS into a temporary backing file;
   repeated commands do not currently share a persistent cache.
-
-## Development
-
-```bash
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-```
-
-Fixture-generation and validation scripts are in `scripts/`. See
-[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for implementation details
-and the format-specific test matrix.
 
 ## License
 
