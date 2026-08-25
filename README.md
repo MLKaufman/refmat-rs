@@ -22,6 +22,8 @@ This  tool to makes it easy to do all of that from the command line, with minima
 To help support this workflow during single-cell analysis:  
 **Single Cell Experiment Object -> Reference Matrix -> ClustifyR -> Cell Type Annotation**
 
+Please check out the [ClustifyR](https://github.com/rnabioco/clustifyr/) or its python port [pyclustifyr](https://github.com/MLKaufman/pyclustifyr) repositories for more information on using a downstream reference matrix for cell type annotation.
+
 ## Highlights
 
 - Automatically detects Seurat and SingleCellExperiment RDS files and AnnData
