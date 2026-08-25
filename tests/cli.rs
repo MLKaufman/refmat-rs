@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static OUTPUT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -22,14 +25,18 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 fn assert_reference(input: &str, expected: &str, extra: &[&str]) {
-    let output = std::env::temp_dir().join(format!("refmat-{}-{input}.tsv", std::process::id()));
+    assert_reference_with_column(input, expected, &["--column", "cell_type"], extra);
+}
+
+fn assert_reference_with_column(input: &str, expected: &str, column_args: &[&str], extra: &[&str]) {
+    let sequence = OUTPUT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let output = std::env::temp_dir().join(format!(
+        "refmat-{}-{sequence}-{input}.tsv",
+        std::process::id()
+    ));
     let input_path = fixture(input);
-    let mut args = vec![
-        "build",
-        input_path.to_str().unwrap(),
-        "--column",
-        "cell_type",
-    ];
+    let mut args = vec!["build", input_path.to_str().unwrap()];
+    args.extend_from_slice(column_args);
     args.extend_from_slice(extra);
     args.extend(["--output", output.to_str().unwrap()]);
     run(&args);
@@ -80,12 +87,48 @@ fn detects_and_prints_sce_and_h5ad_metadata() {
 fn counts_cells_by_metadata_column() {
     for input in ["sce.rds", "anndata.h5ad"] {
         let path = fixture(input);
-        let output = run(&["col", path.to_str().unwrap(), "cell_type"]);
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("| cell_type | cells |"));
-        assert!(stdout.contains("| T cell    | 2     |"));
-        assert!(stdout.contains("| B cell    | 2     |"));
+        for column_args in [
+            &["cell_type"][..],
+            &["-c", "cell_type"][..],
+            &["--column", "cell_type"][..],
+        ] {
+            let mut args = vec!["col", path.to_str().unwrap()];
+            args.extend_from_slice(column_args);
+            let output = run(&args);
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("| cell_type | cells |"));
+            assert!(stdout.contains("| T cell    | 2     |"));
+            assert!(stdout.contains("| B cell    | 2     |"));
+        }
     }
+}
+
+#[test]
+fn build_accepts_each_column_syntax() {
+    assert_reference_with_column("anndata.h5ad", "anndata.expected.tsv", &["cell_type"], &[]);
+    assert_reference_with_column(
+        "anndata.h5ad",
+        "anndata.expected.tsv",
+        &["-c", "cell_type"],
+        &[],
+    );
+}
+
+#[test]
+fn rejects_multiple_column_arguments() {
+    let path = fixture("anndata.h5ad");
+    let output = Command::new(env!("CARGO_BIN_EXE_refmat"))
+        .args([
+            "col",
+            path.to_str().unwrap(),
+            "cell_type",
+            "--column",
+            "batch",
+        ])
+        .output()
+        .expect("refmat should run");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
 }
 
 #[test]

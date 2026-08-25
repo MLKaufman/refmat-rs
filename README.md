@@ -81,7 +81,7 @@ refmat head so.rds
 refmat col so.rds cell_type
 
 # Build sample.refmat.tsv from that annotation.
-refmat build so.rds --column cell_type
+refmat build so.rds cell_type
 ```
 
 Run `refmat --help` or `refmat <COMMAND> --help` for the complete CLI help.
@@ -116,6 +116,7 @@ the stored version and active-assay layout is written to stderr.
 
 ```bash
 refmat col <FILE> <COLUMN>
+refmat col <FILE> --column <COLUMN>
 ```
 
 For example:
@@ -123,6 +124,9 @@ For example:
 ```bash
 refmat col so.rds cell_type
 ```
+
+The column may be positional or supplied with `-c`/`--column`; for example,
+`refmat col so.rds -c cell_type` is equivalent.
 
 ```text
 +-----------+-------+
@@ -140,8 +144,11 @@ with a count of zero; missing annotations are excluded.
 ### Build a reference matrix
 
 ```bash
+refmat build <FILE> <COLUMN>
 refmat build <FILE> --column <COLUMN>
 ```
+
+As with `col`, the column may be positional or supplied with `-c`/`--column`.
 
 Defaults depend on the input format:
 

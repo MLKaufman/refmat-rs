@@ -51,12 +51,24 @@ enum Command {
         rows: usize,
     },
     /// Count cells by the values in a metadata column.
-    Col { file: PathBuf, column: String },
+    Col {
+        file: PathBuf,
+        /// Metadata column (may also be supplied with -c/--column).
+        #[arg(value_name = "COLUMN", conflicts_with = "column_option")]
+        column: Option<String>,
+        /// Metadata column (alternative to the positional COLUMN).
+        #[arg(short = 'c', long = "column", value_name = "COLUMN")]
+        column_option: Option<String>,
+    },
     /// Build a genes-by-group reference matrix.
     Build {
         file: PathBuf,
-        #[arg(short, long)]
-        column: String,
+        /// Metadata column (may also be supplied with -c/--column).
+        #[arg(value_name = "COLUMN", conflicts_with = "column_option")]
+        column: Option<String>,
+        /// Metadata column (alternative to the positional COLUMN).
+        #[arg(short = 'c', long = "column", value_name = "COLUMN")]
+        column_option: Option<String>,
         /// Seurat or SingleCellExperiment assay name.
         #[arg(long)]
         assay: Option<String>,
@@ -76,23 +88,34 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Inspect { file, depth, full } => inspect(&file, depth, full),
         Command::Head { file, rows } => head(&file, rows),
-        Command::Col { file, column } => col(&file, &column),
+        Command::Col {
+            file,
+            column,
+            column_option,
+        } => col(&file, &required_column(column, column_option)?),
         Command::Build {
             file,
             column,
+            column_option,
             assay,
             layer,
             scale,
             output,
         } => build(
             &file,
-            &column,
+            &required_column(column, column_option)?,
             assay.as_deref(),
             layer.as_deref(),
             scale,
             output.as_deref(),
         ),
     }
+}
+
+fn required_column(positional: Option<String>, option: Option<String>) -> Result<String> {
+    positional.or(option).ok_or_else(|| {
+        anyhow!("a metadata column is required; provide COLUMN or -c/--column COLUMN")
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

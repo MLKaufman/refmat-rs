@@ -7,7 +7,7 @@ single-cell containers and produces the same genes-by-groups reference matrix:
 
 ```text
 refmat head <seurat.rds|sce.rds|data.h5ad>
-refmat build <input> --column <annotation>
+refmat build <input> <annotation>
 ```
 
 R, Bioconductor, Python, and Scanpy/AnnData are development-only dependencies.
@@ -99,9 +99,14 @@ the only complete sparse vector held in memory.
 refmat inspect <FILE> [--depth N] [--full]
 refmat head <FILE> [-n ROWS]
 refmat col <FILE> <COLUMN>
-refmat build <FILE> --column NAME [--assay NAME] [--layer NAME]
+refmat col <FILE> -c|--column NAME
+refmat build <FILE> <COLUMN> [--assay NAME] [--layer NAME]
+refmat build <FILE> -c|--column NAME [--assay NAME] [--layer NAME]
              [--scale auto|log1p|linear] [--output FILE]
 ```
+
+For both `col` and `build`, exactly one column is required. It can be supplied
+positionally or with the interchangeable `-c`/`--column` option.
 
 The default output is `<input-stem>.refmat.tsv`. The input filename is always
 required; refmat never selects an arbitrary object from the working directory.
