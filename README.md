@@ -1,6 +1,6 @@
 # refmat
 
-<center><img src="logo.png" alt="refmat logo" width="50%" /></center> 
+<img src="logo.png" alt="refmat logo" width="75%" align="center"/>
 
 `refmat` is a standalone command-line tool for inspecting single-cell objects
 and building genes-by-cell-type reference expression matrices. 
