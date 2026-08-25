@@ -54,7 +54,7 @@ Install the latest release directly from GitHub:
 ```bash
 cargo install \
   --git https://github.com/MLKaufman/refmat-rs.git \
-  --tag v1.1.0 \
+  --tag v1.1.1 \
   --locked
 ```
 
