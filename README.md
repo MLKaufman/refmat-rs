@@ -54,7 +54,7 @@ Install the latest release directly from GitHub:
 ```bash
 cargo install \
   --git https://github.com/MLKaufman/refmat-rs.git \
-  --tag v1.1.1 \
+  --tag v1.1.2 \
   --locked
 ```
 
@@ -66,7 +66,14 @@ binary does not require R, Python, a system HDF5 installation, or liblzma.*
 
 Download the latest release for your platform from the [GitHub releases page](https://github.com/MLKaufman/refmat-rs/releases).
 
-Prebuilt binaries are available for Linux, and ARM-based macOS. After downloading, add the binary to your PATH.
+Release archives are built automatically for Apple Silicon macOS
+(`aarch64-apple-darwin`) and AMD64 Linux (`x86_64-unknown-linux-gnu`, glibc 2.35
+or newer). Download and extract the matching `.tar.gz`, then add `refmat` to
+your PATH. Each release includes `SHA256SUMS` to verify the downloads.
+
+GitHub Actions tests both platforms on pushes to `main` and pull requests.
+Pushing a `v*` tag matching the Cargo package version builds the binaries and
+publishes a GitHub Release after both platforms pass.
 
 ## Quick start
 
