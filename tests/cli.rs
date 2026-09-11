@@ -188,3 +188,95 @@ fn builds_h5ad_dense_x_and_sparse_counts_layer() {
         &["--layer", "counts"],
     );
 }
+
+#[test]
+fn combines_metadata_columns_across_formats() {
+    for input in ["sce.rds", "anndata.h5ad", "seurat-v3.rds", "seurat-v4.rds"] {
+        let path = fixture(input);
+        for (columns, separator, headers) in [
+            (
+                ["batch", "cell_type"],
+                "_",
+                ["one_T cell", "one_B cell", "two_T cell", "two_B cell"],
+            ),
+            (
+                ["cell_type", "batch"],
+                ":",
+                ["T cell:one", "B cell:one", "T cell:two", "B cell:two"],
+            ),
+        ] {
+            let args = [
+                "-c",
+                columns[0],
+                "--column",
+                columns[1],
+                "--separator",
+                separator,
+            ];
+            let mut col_args = vec!["col", path.to_str().unwrap()];
+            col_args.extend(args);
+            let counts = String::from_utf8(run(&col_args).stdout).unwrap();
+            for header in headers {
+                assert!(counts.contains(header));
+            }
+            let output = std::env::temp_dir().join(format!(
+                "refmat-combined-{}-{}.tsv",
+                std::process::id(),
+                OUTPUT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut build_args = vec!["build", path.to_str().unwrap()];
+            build_args.extend(args);
+            build_args.extend(["-o", output.to_str().unwrap()]);
+            run(&build_args);
+            let actual = fs::read_to_string(&output).unwrap();
+            assert_eq!(
+                actual.lines().next().unwrap(),
+                format!("gene\t{}", headers.join("\t"))
+            );
+            let rows = numeric_rows(&actual);
+            for ((_, values), expected) in
+                rows.iter()
+                    .zip([[1_f64, 0., 5., 0.], [0., 2., 0., 4.], [3., 0., 1., 0.]])
+            {
+                for (value, count) in values.iter().zip(expected) {
+                    assert!((value - count.ln_1p()).abs() < 1e-12);
+                }
+            }
+            fs::remove_file(output).unwrap();
+        }
+    }
+}
+
+#[test]
+fn combined_groups_average_multiple_cells() {
+    for input in ["sce.rds", "anndata.h5ad", "seurat-v4.rds"] {
+        let path = fixture(input);
+        let output = std::env::temp_dir().join(format!(
+            "refmat-means-{}-{}.tsv",
+            std::process::id(),
+            OUTPUT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        run(&[
+            "build",
+            path.to_str().unwrap(),
+            "-c",
+            "batch",
+            "-c",
+            "batch",
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        let actual = fs::read_to_string(&output).unwrap();
+        assert_eq!(actual.lines().next().unwrap(), "gene\tone_one\ttwo_two");
+        for ((_, values), means) in
+            numeric_rows(&actual)
+                .iter()
+                .zip([[0.5_f64, 2.5], [1., 2.], [1.5, 0.5]])
+        {
+            for (value, mean) in values.iter().zip(means) {
+                assert!((value - mean.ln_1p()).abs() < 1e-12);
+            }
+        }
+        fs::remove_file(output).unwrap();
+    }
+}

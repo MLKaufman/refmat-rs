@@ -54,7 +54,7 @@ Install the latest release directly from GitHub:
 ```bash
 cargo install \
   --git https://github.com/MLKaufman/refmat-rs.git \
-  --tag v1.1.2 \
+  --tag v1.2.0 \
   --locked
 ```
 
@@ -257,3 +257,30 @@ objects.
 ## License
 
 `refmat` is licensed under the MIT License.
+
+## Group by multiple metadata columns
+
+Repeat `--column` (or `-c`) to group cells by a combination of metadata values:
+
+```bash
+refmat col sample.rds --column condition --column celltype
+refmat build sample.rds --column condition --column celltype --output combined.tsv
+```
+
+Output columns include names such as `wt_macrophage` and `mut_astrocyte`.
+Column arguments determine label order. Use `--separator ':'` to produce
+`wt:macrophage` instead. This syntax works with Seurat, SingleCellExperiment,
+and AnnData (`.h5ad`) inputs; each selected column must be a factor/categorical
+or character/string column.
+
+Combined groups include only combinations observed in the data, in order of
+first appearance. Cells missing any selected grouping value are excluded from
+all group means and counts; the excluded count is reported on stderr. Values
+such as the literal string `NA` are labels, not missing values. Distinct
+combinations that would produce identical output headers cause an error;
+choose another separator to resolve it. Grouping uses the original combinations,
+so ambiguous joined labels never silently merge groups.
+
+Single-column commands keep their existing group order and behavior. The
+positional column syntax still accepts one column; use repeated flags for
+multiple columns, without mixing positional and flagged column arguments.

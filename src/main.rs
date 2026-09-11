@@ -56,9 +56,12 @@ enum Command {
         /// Metadata column (may also be supplied with -c/--column).
         #[arg(value_name = "COLUMN", conflicts_with = "column_option")]
         column: Option<String>,
-        /// Metadata column (alternative to the positional COLUMN).
+        /// Metadata column; repeat to group by multiple columns.
         #[arg(short = 'c', long = "column", value_name = "COLUMN")]
-        column_option: Option<String>,
+        column_option: Vec<String>,
+        /// Separator between combined grouping values.
+        #[arg(long, default_value = "_")]
+        separator: String,
     },
     /// Build a genes-by-group reference matrix.
     Build {
@@ -66,9 +69,12 @@ enum Command {
         /// Metadata column (may also be supplied with -c/--column).
         #[arg(value_name = "COLUMN", conflicts_with = "column_option")]
         column: Option<String>,
-        /// Metadata column (alternative to the positional COLUMN).
+        /// Metadata column; repeat to group by multiple columns.
         #[arg(short = 'c', long = "column", value_name = "COLUMN")]
-        column_option: Option<String>,
+        column_option: Vec<String>,
+        /// Separator between combined grouping values.
+        #[arg(long, default_value = "_")]
+        separator: String,
         /// Seurat or SingleCellExperiment assay name.
         #[arg(long)]
         assay: Option<String>,
@@ -92,18 +98,20 @@ fn main() -> Result<()> {
             file,
             column,
             column_option,
-        } => col(&file, &required_column(column, column_option)?),
+            separator,
+        } => col(&file, &Grouping::new(column, column_option, separator)?),
         Command::Build {
             file,
             column,
             column_option,
+            separator,
             assay,
             layer,
             scale,
             output,
         } => build(
             &file,
-            &required_column(column, column_option)?,
+            &Grouping::new(column, column_option, separator)?,
             assay.as_deref(),
             layer.as_deref(),
             scale,
@@ -112,10 +120,125 @@ fn main() -> Result<()> {
     }
 }
 
-fn required_column(positional: Option<String>, option: Option<String>) -> Result<String> {
-    positional.or(option).ok_or_else(|| {
-        anyhow!("a metadata column is required; provide COLUMN or -c/--column COLUMN")
-    })
+type Groups = (Vec<String>, Vec<Option<usize>>);
+
+struct Grouping {
+    columns: Vec<String>,
+    separator: String,
+}
+
+impl Grouping {
+    fn new(
+        positional: Option<String>,
+        mut columns: Vec<String>,
+        separator: String,
+    ) -> Result<Self> {
+        if let Some(column) = positional {
+            columns.push(column);
+        }
+        ensure!(
+            !columns.is_empty(),
+            "a metadata column is required; provide COLUMN or -c/--column COLUMN"
+        );
+        Ok(Self { columns, separator })
+    }
+
+    fn label(&self) -> String {
+        self.columns.join(&self.separator)
+    }
+
+    fn read(&self, mut read_column: impl FnMut(&str) -> Result<Groups>) -> Result<Groups> {
+        let columns = self
+            .columns
+            .iter()
+            .map(|name| {
+                read_column(name)
+                    .with_context(|| format!("failed to read grouping column '{name}'"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let result = if columns.len() == 1 {
+            columns.into_iter().next().unwrap()
+        } else {
+            combine_groups(&columns, &self.separator)?
+        };
+        let missing = result.1.iter().filter(|group| group.is_none()).count();
+        if missing > 0 {
+            eprintln!("excluded {missing} cells with missing grouping values");
+        }
+        ensure!(
+            !result.0.is_empty(),
+            "grouping columns have no non-missing groups"
+        );
+        Ok(result)
+    }
+}
+
+// Key by category-index tuples, never by the joined output label. Combined
+// groups follow first appearance in cell order and contain only observed tuples.
+fn combine_groups(columns: &[Groups], separator: &str) -> Result<Groups> {
+    let cells = columns[0].1.len();
+    ensure!(
+        columns.iter().all(|column| column.1.len() == cells),
+        "grouping columns have different cell counts"
+    );
+    let mut indices = HashMap::<Vec<usize>, usize>::new();
+    let mut labels = HashMap::<String, Vec<usize>>::new();
+    let mut names = Vec::new();
+    let mut groups = Vec::with_capacity(cells);
+    for cell in 0..cells {
+        let Some(key) = columns
+            .iter()
+            .map(|column| column.1[cell])
+            .collect::<Option<Vec<_>>>()
+        else {
+            groups.push(None);
+            continue;
+        };
+        let index = if let Some(index) = indices.get(&key) {
+            *index
+        } else {
+            let label = columns
+                .iter()
+                .zip(&key)
+                .map(|(column, index)| column.0[*index].as_str())
+                .collect::<Vec<_>>()
+                .join(separator);
+            ensure!(
+                !labels.contains_key(&label),
+                "distinct grouping combinations produce the same header '{label}'; choose another --separator"
+            );
+            let index = names.len();
+            labels.insert(label.clone(), key.clone());
+            names.push(label);
+            indices.insert(key, index);
+            index
+        };
+        groups.push(Some(index));
+    }
+    Ok((names, groups))
+}
+
+fn r_groups(parsed: &ParsedRds, grouping: &Grouping) -> Result<Groups> {
+    if is_sce(&parsed.object) {
+        let columns = sce_columns(&parsed.object)?;
+        grouping.read(|name| {
+            let value = columns
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| anyhow!("colData column '{name}' does not exist"))?;
+            read_groups(value, &parsed.source)
+        })
+    } else {
+        let frame = seurat_metadata_frame(&parsed.object)?;
+        grouping.read(|name| {
+            let value = frame
+                .columns
+                .get(name)
+                .ok_or_else(|| anyhow!("metadata column '{name}' does not exist"))?;
+            read_groups(value, &parsed.source)
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,34 +341,19 @@ fn head(file: &Path, rows: usize) -> Result<()> {
     Ok(())
 }
 
-fn col(file: &Path, column: &str) -> Result<()> {
+fn col(file: &Path, column: &Grouping) -> Result<()> {
     if detect_format(file)? == InputFormat::H5ad {
         return h5ad::col(file, column);
     }
     let parsed = parse_lazy(file)?;
-    let annotation = if is_sce(&parsed.object) {
-        sce_columns(&parsed.object)?
-            .into_iter()
-            .find_map(|(name, values)| (name == column).then_some(values))
-            .ok_or_else(|| anyhow!("colData column '{column}' does not exist"))?
-    } else {
-        seurat_metadata_frame(&parsed.object)?
-            .columns
-            .get(column)
-            .ok_or_else(|| anyhow!("metadata column '{column}' does not exist"))?
-    };
-    let (group_names, cell_groups) = read_groups(annotation, &parsed.source)?;
-    ensure!(
-        !group_names.is_empty(),
-        "metadata column '{column}' has no non-missing groups"
-    );
-    print_group_counts(column, &group_names, &cell_groups);
+    let (group_names, cell_groups) = r_groups(&parsed, column)?;
+    print_group_counts(&column.label(), &group_names, &cell_groups);
     Ok(())
 }
 
 fn build(
     file: &Path,
-    column: &str,
+    column: &Grouping,
     assay: Option<&str>,
     layer: Option<&str>,
     scale: InputScale,
@@ -264,15 +372,7 @@ fn build(
         return sce_build(&parsed, file, column, assay, scale, output);
     }
     let frame = seurat_metadata_frame(&parsed.object)?;
-    let annotation = frame
-        .columns
-        .get(column)
-        .ok_or_else(|| anyhow!("metadata column '{column}' does not exist"))?;
-    let (group_names, cell_groups) = read_groups(annotation, &parsed.source)?;
-    ensure!(
-        !group_names.is_empty(),
-        "metadata column '{column}' has no non-missing groups"
-    );
+    let (group_names, cell_groups) = r_groups(&parsed, column)?;
 
     let active_assay = active_assay_name(&parsed.object)?;
     let assay_name = assay.unwrap_or(&active_assay);
@@ -640,22 +740,12 @@ fn ensure_metadata_cell_order(
 fn sce_build(
     parsed: &ParsedRds,
     file: &Path,
-    column: &str,
+    column: &Grouping,
     assay: Option<&str>,
     scale: InputScale,
     output: Option<&Path>,
 ) -> Result<()> {
-    let columns = sce_columns(&parsed.object)?;
-    let annotation = columns
-        .iter()
-        .find(|(name, _)| name == column)
-        .map(|(_, value)| *value)
-        .ok_or_else(|| anyhow!("colData column '{column}' does not exist"))?;
-    let (group_names, cell_groups) = read_groups(annotation, &parsed.source)?;
-    ensure!(
-        !group_names.is_empty(),
-        "colData column '{column}' has no non-missing groups"
-    );
+    let (group_names, cell_groups) = r_groups(parsed, column)?;
 
     let assay_names = sce_assay_names(&parsed.object)?;
     let default_assay = if assay_names.iter().any(|name| name == "logcounts") {
@@ -1149,7 +1239,7 @@ fn read_groups(
         let groups = codes
             .into_iter()
             .map(|code| {
-                if code > 0 && code as usize <= names.len() {
+                if code > 0 && code as usize <= names.len() && levels[code as usize - 1].is_some() {
                     Some(code as usize - 1)
                 } else {
                     None
@@ -1719,5 +1809,52 @@ mod tests {
             metadata_column_ranges(&rows, &names, &columns, 25),
             vec![0..2, 2..3]
         );
+    }
+}
+
+#[cfg(test)]
+mod combined_group_tests {
+    use super::*;
+    fn groups(names: &[&str], codes: &[Option<usize>]) -> Groups {
+        (
+            names.iter().map(|name| name.to_string()).collect(),
+            codes.to_vec(),
+        )
+    }
+    #[test]
+    fn observed_tuples_exclude_missing_and_unused_levels() {
+        let columns = [
+            groups(
+                &["wt", "mut", "unused"],
+                &[Some(0), Some(1), Some(0), None, Some(1)],
+            ),
+            groups(
+                &["mac", "astro"],
+                &[Some(0), Some(1), Some(0), Some(0), None],
+            ),
+        ];
+        let result = combine_groups(&columns, "_").unwrap();
+        assert_eq!(result.0, ["wt_mac", "mut_astro"]);
+        assert_eq!(result.1, [Some(0), Some(1), Some(0), None, None]);
+    }
+    #[test]
+    fn rejects_colliding_labels_and_mismatched_lengths() {
+        let columns = [
+            groups(&["a_b", "a"], &[Some(0), Some(1)]),
+            groups(&["c", "b_c"], &[Some(0), Some(1)]),
+        ];
+        assert!(
+            combine_groups(&columns, "_")
+                .unwrap_err()
+                .to_string()
+                .contains("--separator")
+        );
+        assert_eq!(combine_groups(&columns, ":").unwrap().0, ["a_b:c", "a:b_c"]);
+        assert!(combine_groups(&[columns[0].clone(), groups(&["c"], &[Some(0)])], "_").is_err());
+    }
+    #[test]
+    fn all_missing_combinations_fail() {
+        let grouping = Grouping::new(None, vec!["a".into(), "b".into()], "_".into()).unwrap();
+        assert!(grouping.read(|_| Ok(groups(&["unused"], &[None]))).is_err());
     }
 }

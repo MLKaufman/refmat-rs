@@ -60,22 +60,18 @@ pub(crate) fn head(path: &Path, rows: usize) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn col(path: &Path, name: &str) -> Result<()> {
+pub(crate) fn col(path: &Path, name: &crate::Grouping) -> Result<()> {
     let file = open(path)?;
     validate_root(&file)?;
     let obs = file.group("obs").context("H5AD has no /obs dataframe")?;
-    let (group_names, cell_groups) = read_groups(&obs, name)?;
-    ensure!(
-        !group_names.is_empty(),
-        "obs column '{name}' has no non-missing groups"
-    );
-    print_group_counts(name, &group_names, &cell_groups);
+    let (group_names, cell_groups) = name.read(|key| read_groups(&obs, key))?;
+    print_group_counts(&name.label(), &group_names, &cell_groups);
     Ok(())
 }
 
 pub(crate) fn build(
     path: &Path,
-    column: &str,
+    column: &crate::Grouping,
     layer: Option<&str>,
     scale: InputScale,
     output: Option<&Path>,
@@ -83,11 +79,7 @@ pub(crate) fn build(
     let file = open(path)?;
     validate_root(&file)?;
     let obs = file.group("obs").context("H5AD has no /obs dataframe")?;
-    let (group_names, cell_groups) = read_groups(&obs, column)?;
-    ensure!(
-        !group_names.is_empty(),
-        "obs column '{column}' has no non-missing groups"
-    );
+    let (group_names, cell_groups) = column.read(|key| read_groups(&obs, key))?;
     let var = file.group("var").context("H5AD has no /var dataframe")?;
     let feature_names = dataframe_index(&var)?;
     let matrix_path = layer.map_or_else(|| "X".to_owned(), |name| format!("layers/{name}"));
