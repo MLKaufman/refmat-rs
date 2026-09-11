@@ -195,6 +195,33 @@ For Seurat v3/v4 `Assay` objects, `--layer` selects the corresponding direct
 slot and must be `counts`, `data`, or `scale.data`. For Seurat v5 `Assay5`
 objects, it selects a named layer.
 
+#### Group by multiple metadata columns
+
+Repeat `--column` (or `-c`) to group cells by a combination of metadata values:
+
+```bash
+refmat col sample.rds --column condition --column celltype
+refmat build sample.rds --column condition --column celltype --output combined.tsv
+```
+
+Output columns include names such as `wt_macrophage` and `mut_astrocyte`.
+Column arguments determine label order. Use `--separator ':'` to produce
+`wt:macrophage` instead. This syntax works with Seurat, SingleCellExperiment,
+and AnnData (`.h5ad`) inputs; each selected column must be a factor/categorical
+or character/string column.
+
+Combined groups include only combinations observed in the data, in order of
+first appearance. Cells missing any selected grouping value are excluded from
+all group means and counts; the excluded count is reported on stderr. Values
+such as the literal string `NA` are labels, not missing values. Distinct
+combinations that would produce identical output headers cause an error;
+choose another separator to resolve it. Grouping uses the original combinations,
+so ambiguous joined labels never silently merge groups.
+
+Single-column commands keep their existing group order and behavior. The
+positional column syntax still accepts one column; use repeated flags for
+multiple columns, without mixing positional and flagged column arguments.
+
 ## Expression scale and aggregation
 
 For each feature and annotation group, `refmat` calculates:
@@ -215,8 +242,8 @@ refmat build raw-counts.h5ad --column cell_type --scale linear
 refmat build normalized.h5ad --column cell_type --scale log1p
 ```
 
-Character annotations preserve first-seen order. R factors preserve factor
-level order, and AnnData categoricals preserve category order. Cells with
+For single-column grouping, character annotations preserve first-seen order.
+R factors preserve factor level order, and AnnData categoricals preserve category order. Cells with
 missing annotations are excluded from the reference matrix.
 
 ## Validation
@@ -257,30 +284,3 @@ objects.
 ## License
 
 `refmat` is licensed under the MIT License.
-
-## Group by multiple metadata columns
-
-Repeat `--column` (or `-c`) to group cells by a combination of metadata values:
-
-```bash
-refmat col sample.rds --column condition --column celltype
-refmat build sample.rds --column condition --column celltype --output combined.tsv
-```
-
-Output columns include names such as `wt_macrophage` and `mut_astrocyte`.
-Column arguments determine label order. Use `--separator ':'` to produce
-`wt:macrophage` instead. This syntax works with Seurat, SingleCellExperiment,
-and AnnData (`.h5ad`) inputs; each selected column must be a factor/categorical
-or character/string column.
-
-Combined groups include only combinations observed in the data, in order of
-first appearance. Cells missing any selected grouping value are excluded from
-all group means and counts; the excluded count is reported on stderr. Values
-such as the literal string `NA` are labels, not missing values. Distinct
-combinations that would produce identical output headers cause an error;
-choose another separator to resolve it. Grouping uses the original combinations,
-so ambiguous joined labels never silently merge groups.
-
-Single-column commands keep their existing group order and behavior. The
-positional column syntax still accepts one column; use repeated flags for
-multiple columns, without mixing positional and flagged column arguments.
